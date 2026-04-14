@@ -1,4 +1,5 @@
 import hashlib
+import ipaddress
 import json
 import secrets
 import socket
@@ -240,6 +241,8 @@ def write_default_config_and_exit() -> None:
         "wake_attempt_interval_seconds": 2.0,
         "wake_connect_timeout_seconds": 20.0,
         "turn_on_target": "",
+        "wake_broadcast_addresses": [],
+        "wake_ports": [9, 7],
     }
 
     CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
@@ -490,29 +493,30 @@ def switch_to_target(session: WebOSTVSession, target: str) -> dict[str, Any]:
     return source_payload(source)
 
 
-def send_wol_sequence(tv_mac: str) -> int:
+def send_wol_sequence(tv_mac: str) -> tuple[int, list[tuple[str, int]]]:
     wake_attempts = max(1, int(CONFIG.get("wake_attempts", 3)))
     wake_attempt_interval = max(
         0.0, float(CONFIG.get("wake_attempt_interval_seconds", 2.0))
     )
+    last_targets: list[tuple[str, int]] = []
 
     for attempt_index in range(wake_attempts):
-        send_wol_packet(tv_mac)
+        last_targets = send_wol_packet(tv_mac)
         if attempt_index < wake_attempts - 1 and wake_attempt_interval > 0:
             time.sleep(wake_attempt_interval)
 
-    return wake_attempts
+    return wake_attempts, last_targets
 
 
-def wake_tv_and_wait(tv_mac: str) -> tuple[WebOSTVSession, int]:
-    wake_attempts = send_wol_sequence(tv_mac)
+def wake_tv_and_wait(tv_mac: str) -> tuple[WebOSTVSession, int, list[tuple[str, int]]]:
+    wake_attempts, wake_targets = send_wol_sequence(tv_mac)
     wait_seconds = float(CONFIG.get("wake_wait_seconds", 8.0))
     connect_timeout = float(CONFIG.get("wake_connect_timeout_seconds", 20.0))
 
     if wait_seconds > 0:
         time.sleep(wait_seconds)
 
-    return wait_for_tv_connection(connect_timeout), wake_attempts
+    return wait_for_tv_connection(connect_timeout), wake_attempts, wake_targets
 
 
 def open_session_for_source_change() -> tuple[WebOSTVSession, bool, int]:
@@ -526,7 +530,7 @@ def open_session_for_source_change() -> tuple[WebOSTVSession, bool, int]:
         if not tv_mac:
             raise
 
-        session, wake_attempts = wake_tv_and_wait(tv_mac)
+        session, wake_attempts, _wake_targets = wake_tv_and_wait(tv_mac)
         return session, True, wake_attempts
 
 
@@ -566,7 +570,42 @@ def get_tv_status(session: WebOSTVSession) -> dict[str, Any]:
     }
 
 
-def send_wol_packet(mac_address: str) -> None:
+def get_wake_targets() -> list[tuple[str, int]]:
+    configured_addresses = CONFIG.get("wake_broadcast_addresses") or []
+    configured_ports = CONFIG.get("wake_ports") or [9, 7]
+
+    addresses: list[str] = []
+    if isinstance(configured_addresses, list):
+        addresses.extend(str(value).strip() for value in configured_addresses if str(value).strip())
+
+    if "255.255.255.255" not in addresses:
+        addresses.append("255.255.255.255")
+
+    pairing_host = str(read_pairing().get("host") or "").strip()
+    if pairing_host:
+        try:
+            subnet_broadcast = str(
+                ipaddress.ip_network(f"{pairing_host}/24", strict=False).broadcast_address
+            )
+            if subnet_broadcast not in addresses:
+                addresses.append(subnet_broadcast)
+        except ValueError:
+            pass
+
+    ports: list[int] = []
+    if isinstance(configured_ports, list):
+        for value in configured_ports:
+            try:
+                ports.append(int(value))
+            except (TypeError, ValueError):
+                continue
+    if not ports:
+        ports = [9, 7]
+
+    return [(address, port) for address in addresses for port in ports]
+
+
+def send_wol_packet(mac_address: str) -> list[tuple[str, int]]:
     cleaned = mac_address.replace(":", "").replace("-", "").strip().lower()
     if len(cleaned) != 12:
         raise HTTPException(status_code=400, detail="Invalid tv_mac format")
@@ -577,9 +616,13 @@ def send_wol_packet(mac_address: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid tv_mac format") from exc
 
     packet = b"\xff" * 6 + mac_bytes * 16
+    wake_targets = get_wake_targets()
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.sendto(packet, ("255.255.255.255", 9))
+        for address, port in wake_targets:
+            sock.sendto(packet, (address, port))
+
+    return wake_targets
 
 
 def load_cert_info() -> dict[str, str | None]:
@@ -790,7 +833,7 @@ async def tv_action(
                 )
 
             target_after_wake = resolve_turn_on_target(body.target)
-            session, wake_attempts = wake_tv_and_wait(tv_mac)
+            session, wake_attempts, wake_targets = wake_tv_and_wait(tv_mac)
             try:
                 source_changed_to = None
                 if target_after_wake is not None:
@@ -802,6 +845,10 @@ async def tv_action(
                         "action": "turn_on",
                         "wake_signal_sent": True,
                         "wake_attempts": wake_attempts,
+                        "wake_targets": [
+                            {"address": address, "port": port}
+                            for address, port in wake_targets
+                        ],
                         "tv_online": True,
                         "tv_mac": tv_mac,
                         "target_after_wake": target_after_wake,

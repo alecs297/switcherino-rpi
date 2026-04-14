@@ -41,6 +41,7 @@ Clone the repo to your home directory (or somewhere else, but adapt the commands
 ```bash
 cd ~
 git clone https://github.com/alecs297/switcherino-rpi
+cd switcherino-rpi
 ```
 
 Create a python virtual environment and install the dependencies

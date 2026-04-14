@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import json
 import secrets
@@ -6,17 +5,60 @@ import socket
 import ssl
 import time
 from pathlib import Path
+from typing import Any, Literal
 
 import cec
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel, Field
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
 
 CEC_INITIALIZED = False
-app = FastAPI()
+security = HTTPBasic()
+
+app = FastAPI(
+    title="HDMI CEC API",
+    description=(
+        "HTTPS API for controlling HDMI-CEC devices from a Raspberry Pi. "
+        "Protected CEC endpoints use HTTP Basic authentication."
+    ),
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+)
+
+
+class ActionRequest(BaseModel):
+    action: Literal["turn_on", "turn_off", "change_source", "game", "default"] = Field(
+        ...,
+        description=(
+            "Action to perform.\n\n"
+            "- **turn_on**: Power on the target device\n"
+            "- **turn_off**: Put the target device in standby\n"
+            "- **change_source**: Switch active HDMI source to target\n"
+            "- **game**: Power on `pc_target` if needed, switch to it, optionally raise volume\n"
+            "- **default**: If `default_target` is on, switch to it, optionally lower volume"
+        ),
+        examples=["game"],
+    )
+    target: int | str | None = Field(
+        default=None,
+        description=(
+            "Target CEC device.\n\n"
+            "Accepted values:\n"
+            "- integer logical address, for example `4`\n"
+            "- `'default'` → configured `default_target`\n"
+            "- `'pc'` → configured `pc_target`\n\n"
+            "Used by `turn_on`, `turn_off`, and `change_source`.\n"
+            "Ignored by `game` and `default`."
+        ),
+        examples=[4],
+    )
 
 
 def detect_local_ip() -> str:
@@ -58,7 +100,7 @@ def write_default_config_and_exit() -> None:
     print(f"Created config at: {CONFIG_PATH}")
     print(f"Detected IP: {local_ip}")
     print(f"Generated admin key: {config['admin_key']}")
-    print("Review config.json, run ./scripts/gen_certs.sh, then start the app again.")
+    print("Review config.json, run ./gen_certs.sh, then start the app again.")
     raise SystemExit(0)
 
 
@@ -82,28 +124,12 @@ def ensure_cec_initialized() -> None:
     CEC_INITIALIZED = True
 
 
-def check_basic_auth(request: Request) -> None:
-    auth = request.headers.get("authorization", "")
-    if not auth.startswith("Basic "):
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-
-    try:
-        decoded = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
-        username, password = decoded.split(":", 1)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized",
-            headers={"WWW-Authenticate": "Basic"},
-        ) from exc
-
+def check_basic_auth(
+    credentials: HTTPBasicCredentials = Depends(security),
+) -> None:
     if not (
-        secrets.compare_digest(username, CONFIG["admin_username"])
-        and secrets.compare_digest(password, CONFIG["admin_key"])
+        secrets.compare_digest(credentials.username, CONFIG["admin_username"])
+        and secrets.compare_digest(credentials.password, CONFIG["admin_key"])
     ):
         raise HTTPException(
             status_code=401,
@@ -112,24 +138,23 @@ def check_basic_auth(request: Request) -> None:
         )
 
 
-def resolve_target(raw_target) -> int:
+def resolve_target(raw_target: int | str | None) -> int:
     if raw_target is None:
         return int(CONFIG["default_target"])
 
     if isinstance(raw_target, int):
         return raw_target
 
-    if isinstance(raw_target, str):
-        value = raw_target.strip().lower()
+    value = raw_target.strip().lower()
 
-        if value.isdigit():
-            return int(value)
+    if value.isdigit():
+        return int(value)
 
-        if value == "default":
-            return int(CONFIG["default_target"])
+    if value == "default":
+        return int(CONFIG["default_target"])
 
-        if value == "pc":
-            return int(CONFIG["pc_target"])
+    if value == "pc":
+        return int(CONFIG["pc_target"])
 
     raise HTTPException(status_code=400, detail="Invalid target")
 
@@ -139,7 +164,7 @@ def get_device(target: int) -> cec.Device:
     return cec.Device(target)
 
 
-def get_device_info(target: int) -> dict:
+def get_device_info(target: int) -> dict[str, Any]:
     device = get_device(target)
     return {
         "target": target,
@@ -180,26 +205,28 @@ def press_volume_down(presses: int | None = None, delay: float | None = None) ->
         time.sleep(delay)
 
 
-def load_cert_info() -> dict:
+def load_cert_info() -> dict[str, str | None]:
     cert_path = Path(CONFIG["cert_file"])
     if not cert_path.exists():
         raise HTTPException(status_code=503, detail="Certificate file not found")
 
     pem_text = cert_path.read_text(encoding="utf-8")
     der_bytes = ssl.PEM_cert_to_DER_cert(pem_text)
-
     sha256_fingerprint = hashlib.sha256(der_bytes).hexdigest()
-    sha1_fingerprint = hashlib.sha1(der_bytes).hexdigest()
 
     return {
         "suggested_base_url": CONFIG.get("suggested_base_url"),
         "sha256_fingerprint": sha256_fingerprint,
-        "sha1_fingerprint": sha1_fingerprint,
         "pem": pem_text,
     }
 
 
-@app.get("/certs")
+@app.get(
+    "/certs",
+    tags=["Public"],
+    summary="Get certificate pinning material",
+    description="Returns certificate information clients can use for TOFU-style pinning.",
+)
 async def certs():
     return JSONResponse(
         {
@@ -209,39 +236,152 @@ async def certs():
     )
 
 
-@app.get("/cec/status")
-async def cec_status(request: Request, target: str | None = None):
-    check_basic_auth(request)
-
+@app.get(
+    "/cec/status",
+    tags=["CEC"],
+    summary="Get configured device statuses",
+    description="Returns status for both the configured default target and pc target.",
+)
+async def cec_status(_: None = Depends(check_basic_auth)):
     try:
-        resolved_target = resolve_target(target)
         return JSONResponse(
             {
                 "ok": True,
-                "status": get_device_info(resolved_target),
                 "default_target": int(CONFIG["default_target"]),
                 "pc_target": int(CONFIG["pc_target"]),
-                "change_volume": volume_enabled(),
+                "default_status": get_device_info(int(CONFIG["default_target"])),
+                "pc_status": get_device_info(int(CONFIG["pc_target"])),
+                "volume_control_enabled": volume_enabled(),
             }
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/cec/action")
-async def cec_action(request: Request):
-    check_basic_auth(request)
-
-    try:
-        body = await request.json()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
-
-    action = str(body.get("action", "")).strip().lower()
+@app.post(
+    "/cec/action",
+    tags=["CEC"],
+    summary="Perform a CEC action",
+    description=(
+        "Control HDMI-CEC devices.\n\n"
+        "### Actions\n"
+        "- `turn_on` → Power on a target device\n"
+        "- `turn_off` → Put a target device in standby\n"
+        "- `change_source` → Switch the active HDMI source to a target device\n"
+        "- `game` → Power on `pc_target` if needed, switch to it, and optionally raise volume\n"
+        "- `default` → If `default_target` is on, switch to it, and optionally lower volume\n\n"
+        "### Target values\n"
+        "- integer CEC logical address, such as `4`\n"
+        "- `default`\n"
+        "- `pc`\n\n"
+        "### Notes\n"
+        "- `game` and `default` ignore the request body's `target`\n"
+        "- Volume changes only happen if `change_volume` is enabled in config"
+    ),
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "turn_on": {
+                            "summary": "Turn on a device",
+                            "value": {"action": "turn_on", "target": 4},
+                        },
+                        "turn_off": {
+                            "summary": "Turn off the configured pc target",
+                            "value": {"action": "turn_off", "target": "pc"},
+                        },
+                        "change_source": {
+                            "summary": "Switch to a specific source",
+                            "value": {"action": "change_source", "target": 4},
+                        },
+                        "game": {
+                            "summary": "Switch to the configured game source",
+                            "value": {"action": "game"},
+                        },
+                        "default": {
+                            "summary": "Return to the configured default source",
+                            "value": {"action": "default"},
+                        },
+                    }
+                }
+            }
+        }
+    },
+    responses={
+        200: {
+            "description": "Successful action",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "game_response": {
+                            "summary": "Game action response",
+                            "value": {
+                                "ok": True,
+                                "action": "game",
+                                "target": 0,
+                                "powered_on_before": False,
+                                "powered_on_action_taken": True,
+                                "source_changed_to": 0,
+                                "volume": "volume_up_applied",
+                                "status": {
+                                    "target": 0,
+                                    "osd_string": "TV",
+                                    "vendor": "LG",
+                                    "physical_address": "0.0.0.0",
+                                    "active": True,
+                                    "on": True,
+                                },
+                            },
+                        }
+                    }
+                }
+            },
+        },
+        400: {
+            "description": "Invalid request",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "invalid_target": {
+                            "summary": "Invalid target",
+                            "value": {"detail": "Invalid target"},
+                        },
+                        "unsupported_action": {
+                            "summary": "Unsupported action",
+                            "value": {"detail": "Unsupported action"},
+                        },
+                    }
+                }
+            },
+        },
+        401: {
+            "description": "Authentication required or invalid credentials",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Unauthorized"}
+                }
+            },
+        },
+        503: {
+            "description": "CEC unavailable",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "No CEC adapters found"}
+                }
+            },
+        },
+    },
+)
+async def cec_action(
+    body: ActionRequest,
+    _: None = Depends(check_basic_auth),
+):
+    action = body.action
 
     try:
         if action == "turn_on":
-            target = resolve_target(body.get("target"))
+            target = resolve_target(body.target)
             device = get_device(target)
             device.power_on()
             return JSONResponse(
@@ -254,7 +394,7 @@ async def cec_action(request: Request):
             )
 
         if action == "turn_off":
-            target = resolve_target(body.get("target"))
+            target = resolve_target(body.target)
             device = get_device(target)
             device.standby()
             return JSONResponse(
@@ -267,7 +407,7 @@ async def cec_action(request: Request):
             )
 
         if action == "change_source":
-            target = resolve_target(body.get("target"))
+            target = resolve_target(body.target)
             set_active_source(target)
             return JSONResponse(
                 {
@@ -345,13 +485,7 @@ async def cec_action(request: Request):
                 }
             )
 
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Unsupported action. Use one of: "
-                "turn_on, turn_off, change_source, game, default"
-            ),
-        )
+        raise HTTPException(status_code=400, detail="Unsupported action")
 
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

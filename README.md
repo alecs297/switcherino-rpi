@@ -157,7 +157,10 @@ Review `config.json` and adjust the important fields:
 {
   "default_target": "HDMI_1",
   "pc_target": "HDMI_2",
-  "change_volume": false,
+  "change_volume_on_game_mode": true,
+  "change_volume_on_default_mode": true,
+  "game_mode_volume": 15,
+  "default_mode_volume": 0,
   "tv_mac": ""
 }
 ```
@@ -166,6 +169,10 @@ Notes:
 
 - `default_target` and `pc_target` should preferably use WebOS source ids such as `HDMI_1` or `HDMI_2`
 - labels are accepted too, but they are not guaranteed to be unique on LG TVs
+- `switch_to_game_mode` uses `pc_target`
+- `switch_to_default_mode` uses `default_target`
+- `change_volume_on_game_mode` and `change_volume_on_default_mode` control whether those mode switches set the TV volume
+- `game_mode_volume` and `default_mode_volume` are explicit target volumes from `0` to `100`
 - if you want the `turn_on` action to work, set `tv_mac` to the TV MAC address for Wake-on-LAN
 - if you leave `tv_mac` empty, `turn_on` will return an error by design
 
@@ -228,16 +235,16 @@ Supported actions:
 - `turn_on`
 - `turn_off`
 - `change_source`
-- `game`
-- `default`
+- `switch_to_game_mode`
+- `switch_to_default_mode`
 
 Action behavior:
 
-- `change_source` switches to a source identified by id or label
-- `game` switches to `pc_target`
-- `default` switches to `default_target`
+- `change_source` switches to a source identified by id or label and will try to wake the TV first if needed
+- `switch_to_game_mode` switches to `pc_target` and can set the TV volume to `game_mode_volume`
+- `switch_to_default_mode` switches to `default_target` and can set the TV volume to `default_mode_volume`
 - `turn_off` powers the TV off via WebOS
-- `turn_on` sends a Wake-on-LAN packet and therefore requires `tv_mac`
+- `turn_on` sends a Wake-on-LAN packet, waits for WebOS to come back, and can optionally switch to a target afterward
 
 Example request:
 

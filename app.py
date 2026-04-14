@@ -120,18 +120,43 @@ ACTION_RESPONSE_EXAMPLES = {
             },
         },
     },
-    "game": {
+    "switch_to_game_mode": {
         "summary": "Switch to the configured gaming source",
         "value": {
             "ok": True,
-            "action": "game",
+            "action": "switch_to_game_mode",
             "target": "HDMI_2",
             "source_changed_to": {
                 "id": "HDMI_2",
                 "label": "PC",
                 "connected": True,
             },
-            "volume": "skipped",
+            "volume": {
+                "changed": True,
+                "target": 15,
+            },
+            "status": {
+                "current_app": "com.webos.app.hdmi2",
+                "default_target": "HDMI_1",
+                "pc_target": "HDMI_2",
+            },
+        },
+    },
+    "turn_on": {
+        "summary": "Wake the TV and switch to a target after it comes online",
+        "value": {
+            "ok": True,
+            "action": "turn_on",
+            "wake_signal_sent": True,
+            "wake_attempts": 2,
+            "tv_online": True,
+            "tv_mac": "f8:01:b4:d2:c6:5a",
+            "target_after_wake": "HDMI_2",
+            "source_changed_to": {
+                "id": "HDMI_2",
+                "label": "PC",
+                "connected": True,
+            },
             "status": {
                 "current_app": "com.webos.app.hdmi2",
                 "default_target": "HDMI_1",
@@ -143,17 +168,23 @@ ACTION_RESPONSE_EXAMPLES = {
 
 
 class ActionRequest(BaseModel):
-    action: Literal["turn_on", "turn_off", "change_source", "game", "default"] = Field(
+    action: Literal[
+        "turn_on",
+        "turn_off",
+        "change_source",
+        "switch_to_game_mode",
+        "switch_to_default_mode",
+    ] = Field(
         ...,
         description=(
             "Action to perform.\n\n"
             "- **turn_on**: Wake the TV over the network if `tv_mac` is configured\n"
             "- **turn_off**: Turn the TV off through WebOS\n"
             "- **change_source**: Switch the TV to a configured or explicit source\n"
-            "- **game**: Switch to `pc_target`, optionally raise volume\n"
-            "- **default**: Switch to `default_target`, optionally lower volume"
+            "- **switch_to_game_mode**: Switch to `pc_target` and optionally set the game volume\n"
+            "- **switch_to_default_mode**: Switch to `default_target` and optionally set the default volume"
         ),
-        examples=["game"],
+        examples=["switch_to_game_mode"],
     )
     target: str | None = Field(
         default=None,
@@ -164,7 +195,8 @@ class ActionRequest(BaseModel):
             "- WebOS source id, such as `HDMI_1`\n"
             "- source label, such as `HDMI 1`\n\n"
             "Used by `change_source` and optionally by `turn_on`.\n"
-            "Ignored by `game` and `default`."
+            "For `turn_on`, the target is applied after the TV becomes reachable.\n"
+            "Ignored by `switch_to_game_mode` and `switch_to_default_mode`."
         ),
         examples=["HDMI_1"],
     )
@@ -199,11 +231,15 @@ def write_default_config_and_exit() -> None:
         "cert_file": str(APP_DIR / "certs" / "server.crt"),
         "key_file": str(APP_DIR / "certs" / "server.key"),
         "suggested_base_url": f"https://{local_ip}:8443",
-        "volume_up_presses": 10,
-        "volume_down_presses": 30,
-        "volume_press_delay_seconds": 0.08,
-        "change_volume": False,
+        "change_volume_on_game_mode": False,
+        "change_volume_on_default_mode": False,
+        "game_mode_volume": 15,
+        "default_mode_volume": 0,
         "wake_wait_seconds": 8.0,
+        "wake_attempts": 3,
+        "wake_attempt_interval_seconds": 2.0,
+        "wake_connect_timeout_seconds": 20.0,
+        "turn_on_target": "",
     }
 
     CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
@@ -258,8 +294,12 @@ def check_basic_auth(
         )
 
 
-def volume_enabled() -> bool:
-    return bool(CONFIG.get("change_volume", False))
+def volume_enabled_for_game_mode() -> bool:
+    return bool(CONFIG.get("change_volume_on_game_mode", False))
+
+
+def volume_enabled_for_default_mode() -> bool:
+    return bool(CONFIG.get("change_volume_on_default_mode", False))
 
 
 def normalize_target(value: str) -> str:
@@ -398,12 +438,105 @@ def resolve_target(raw_target: str | None) -> str:
     return value
 
 
+def resolve_mode_target(mode: Literal["default", "pc"]) -> str:
+    if mode == "default":
+        return str(CONFIG["default_target"])
+    return str(CONFIG["pc_target"])
+
+
 def find_source(session: WebOSTVSession, target: str) -> Any:
     sources = session.source.list_sources()
     for source in sources:
         if match_source(source, target):
             return source
     raise HTTPException(status_code=404, detail=f"Source not found: {target}")
+
+
+def wait_for_tv_connection(timeout_seconds: float) -> WebOSTVSession:
+    deadline = time.monotonic() + max(timeout_seconds, 0.0)
+    last_exception: Exception | None = None
+
+    while time.monotonic() <= deadline:
+        session = WebOSTVSession()
+        try:
+            session.__enter__()
+            return session
+        except Exception as exc:
+            last_exception = exc
+            session.__exit__(None, None, None)
+            time.sleep(1.0)
+
+    detail = "TV did not come online after Wake-on-LAN"
+    if last_exception is not None:
+        detail = f"{detail}: {last_exception}"
+    raise RuntimeError(detail)
+
+
+def resolve_turn_on_target(raw_target: str | None) -> str | None:
+    if raw_target and raw_target.strip():
+        return resolve_target(raw_target)
+
+    config_target = str(CONFIG.get("turn_on_target") or "").strip()
+    if config_target:
+        return resolve_target(config_target)
+
+    return None
+
+
+def switch_to_target(session: WebOSTVSession, target: str) -> dict[str, Any]:
+    source = find_source(session, target)
+    session.source.set_source(source)
+    time.sleep(0.25)
+    return source_payload(source)
+
+
+def send_wol_sequence(tv_mac: str) -> int:
+    wake_attempts = max(1, int(CONFIG.get("wake_attempts", 3)))
+    wake_attempt_interval = max(
+        0.0, float(CONFIG.get("wake_attempt_interval_seconds", 2.0))
+    )
+
+    for attempt_index in range(wake_attempts):
+        send_wol_packet(tv_mac)
+        if attempt_index < wake_attempts - 1 and wake_attempt_interval > 0:
+            time.sleep(wake_attempt_interval)
+
+    return wake_attempts
+
+
+def wake_tv_and_wait(tv_mac: str) -> tuple[WebOSTVSession, int]:
+    wake_attempts = send_wol_sequence(tv_mac)
+    wait_seconds = float(CONFIG.get("wake_wait_seconds", 8.0))
+    connect_timeout = float(CONFIG.get("wake_connect_timeout_seconds", 20.0))
+
+    if wait_seconds > 0:
+        time.sleep(wait_seconds)
+
+    return wait_for_tv_connection(connect_timeout), wake_attempts
+
+
+def open_session_for_source_change() -> tuple[WebOSTVSession, bool, int]:
+    try:
+        session = WebOSTVSession()
+        session.__enter__()
+        return session, False, 0
+    except Exception:
+        session.__exit__(None, None, None)
+        tv_mac = str(CONFIG.get("tv_mac") or "").strip()
+        if not tv_mac:
+            raise
+
+        session, wake_attempts = wake_tv_and_wait(tv_mac)
+        return session, True, wake_attempts
+
+
+def set_volume_target(session: WebOSTVSession, target_volume: int) -> dict[str, Any]:
+    volume = max(0, min(100, int(target_volume)))
+    session.media.set_volume(volume)
+    return {
+        "changed": True,
+        "target": volume,
+    }
 
 
 def get_tv_status(session: WebOSTVSession) -> dict[str, Any]:
@@ -426,9 +559,10 @@ def get_tv_status(session: WebOSTVSession) -> dict[str, Any]:
         "current_app": current_app,
         "volume": volume,
         "sources": sources,
-        "default_target": resolve_target("default"),
-        "pc_target": resolve_target("pc"),
-        "volume_control_enabled": volume_enabled(),
+        "default_target": resolve_mode_target("default"),
+        "pc_target": resolve_mode_target("pc"),
+        "change_volume_on_game_mode": volume_enabled_for_game_mode(),
+        "change_volume_on_default_mode": volume_enabled_for_default_mode(),
     }
 
 
@@ -446,26 +580,6 @@ def send_wol_packet(mac_address: str) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.sendto(packet, ("255.255.255.255", 9))
-
-
-def press_volume_up(session: WebOSTVSession, presses: int | None = None, delay: float | None = None) -> None:
-    presses = int(presses or CONFIG.get("volume_up_presses", 10))
-    delay = float(delay or CONFIG.get("volume_press_delay_seconds", 0.08))
-
-    for _ in range(presses):
-        session.media.volume_up()
-        time.sleep(delay)
-
-
-def press_volume_down(
-    session: WebOSTVSession, presses: int | None = None, delay: float | None = None
-) -> None:
-    presses = int(presses or CONFIG.get("volume_down_presses", 30))
-    delay = float(delay or CONFIG.get("volume_press_delay_seconds", 0.08))
-
-    for _ in range(presses):
-        session.media.volume_down()
-        time.sleep(delay)
 
 
 def load_cert_info() -> dict[str, str | None]:
@@ -570,11 +684,11 @@ async def tv_status(_: None = Depends(check_basic_auth)):
     description=(
         "Control the LG TV through WebOS while keeping the original API shape.\n\n"
         "### Actions\n"
-        "- `turn_on` -> Send Wake-on-LAN if `tv_mac` is configured\n"
+        "- `turn_on` -> Send Wake-on-LAN, wait for the TV to come online, and optionally switch source\n"
         "- `turn_off` -> Turn the TV off\n"
-        "- `change_source` -> Switch to a configured or explicit source\n"
-        "- `game` -> Switch to `pc_target` and optionally raise volume\n"
-        "- `default` -> Switch to `default_target` and optionally lower volume\n\n"
+        "- `change_source` -> Switch to a configured or explicit source, waking the TV first if needed\n"
+        "- `switch_to_game_mode` -> Switch to `pc_target`, waking the TV first if needed, and optionally set volume\n"
+        "- `switch_to_default_mode` -> Switch to `default_target`, waking the TV first if needed, and optionally set volume\n\n"
         "### Target advice\n"
         "- prefer source ids such as `HDMI_1` over labels such as `PC`\n"
         "- labels can be duplicated on LG TVs\n"
@@ -593,21 +707,21 @@ async def tv_status(_: None = Depends(check_basic_auth)):
                             "summary": "Switch using a configured alias",
                             "value": {"action": "change_source", "target": "default"},
                         },
-                        "game": {
-                            "summary": "Switch to the configured PC source",
-                            "value": {"action": "game"},
+                        "switch_to_game_mode": {
+                            "summary": "Switch to the configured PC source and set game volume",
+                            "value": {"action": "switch_to_game_mode"},
                         },
-                        "default": {
-                            "summary": "Return to the default source",
-                            "value": {"action": "default"},
+                        "switch_to_default_mode": {
+                            "summary": "Return to the default source and set default volume",
+                            "value": {"action": "switch_to_default_mode"},
                         },
                         "turn_off": {
                             "summary": "Power the TV off",
                             "value": {"action": "turn_off"},
                         },
                         "turn_on": {
-                            "summary": "Wake the TV over the network",
-                            "value": {"action": "turn_on"},
+                            "summary": "Wake the TV and switch to the configured PC source",
+                            "value": {"action": "turn_on", "target": "pc"},
                         },
                     }
                 }
@@ -675,22 +789,31 @@ async def tv_action(
                     detail="Cannot turn on the TV over WebOS alone. Set `tv_mac` in config.json to enable Wake-on-LAN.",
                 )
 
-            send_wol_packet(tv_mac)
-            wait_seconds = float(CONFIG.get("wake_wait_seconds", 8.0))
-            if wait_seconds > 0:
-                time.sleep(wait_seconds)
+            target_after_wake = resolve_turn_on_target(body.target)
+            session, wake_attempts = wake_tv_and_wait(tv_mac)
+            try:
+                source_changed_to = None
+                if target_after_wake is not None:
+                    source_changed_to = switch_to_target(session, target_after_wake)
 
-            return JSONResponse(
-                {
-                    "ok": True,
-                    "action": "turn_on",
-                    "wake_signal_sent": True,
-                    "tv_mac": tv_mac,
-                }
-            )
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "action": "turn_on",
+                        "wake_signal_sent": True,
+                        "wake_attempts": wake_attempts,
+                        "tv_online": True,
+                        "tv_mac": tv_mac,
+                        "target_after_wake": target_after_wake,
+                        "source_changed_to": source_changed_to,
+                        "status": get_tv_status(session),
+                    }
+                )
+            finally:
+                session.__exit__(None, None, None)
 
-        with WebOSTVSession() as session:
-            if action == "turn_off":
+        if action == "turn_off":
+            with WebOSTVSession() as session:
                 session.system.power_off()
                 return JSONResponse(
                     {
@@ -699,64 +822,73 @@ async def tv_action(
                     }
                 )
 
-            if action == "change_source":
-                target = resolve_target(body.target)
-                source = find_source(session, target)
-                session.source.set_source(source)
-                time.sleep(0.25)
-                return JSONResponse(
-                    {
-                        "ok": True,
-                        "action": "change_source",
-                        "target": target,
-                        "source": source_payload(source),
-                        "status": get_tv_status(session),
-                    }
-                )
+        if action in {
+            "change_source",
+            "switch_to_game_mode",
+            "switch_to_default_mode",
+        }:
+            session, wake_signal_sent, wake_attempts = open_session_for_source_change()
+            try:
+                if action == "change_source":
+                    target = resolve_target(body.target)
+                    source = switch_to_target(session, target)
+                    return JSONResponse(
+                        {
+                            "ok": True,
+                            "action": "change_source",
+                            "target": target,
+                            "wake_signal_sent": wake_signal_sent,
+                            "wake_attempts": wake_attempts,
+                            "source": source,
+                            "status": get_tv_status(session),
+                        }
+                    )
 
-            if action == "game":
-                target = resolve_target("pc")
-                source = find_source(session, target)
-                session.source.set_source(source)
-                time.sleep(0.25)
+                if action == "switch_to_game_mode":
+                    target = resolve_mode_target("pc")
+                    source = switch_to_target(session, target)
+                    volume = {"changed": False, "target": None}
+                    if volume_enabled_for_game_mode():
+                        volume = set_volume_target(
+                            session, int(CONFIG.get("game_mode_volume", 15))
+                        )
 
-                volume_action = "skipped"
-                if volume_enabled():
-                    press_volume_up(session)
-                    volume_action = "volume_up_applied"
+                    return JSONResponse(
+                        {
+                            "ok": True,
+                            "action": "switch_to_game_mode",
+                            "target": target,
+                            "wake_signal_sent": wake_signal_sent,
+                            "wake_attempts": wake_attempts,
+                            "source_changed_to": source,
+                            "volume": volume,
+                            "status": get_tv_status(session),
+                        }
+                    )
 
-                return JSONResponse(
-                    {
-                        "ok": True,
-                        "action": "game",
-                        "target": target,
-                        "source_changed_to": source_payload(source),
-                        "volume": volume_action,
-                        "status": get_tv_status(session),
-                    }
-                )
+                if action == "switch_to_default_mode":
+                    target = resolve_mode_target("default")
+                    source = switch_to_target(session, target)
+                    volume = {"changed": False, "target": None}
+                    if volume_enabled_for_default_mode():
+                        volume = set_volume_target(
+                            session, int(CONFIG.get("default_mode_volume", 0))
+                        )
 
-            if action == "default":
-                target = resolve_target("default")
-                source = find_source(session, target)
-                session.source.set_source(source)
-                time.sleep(0.25)
-
-                volume_action = "skipped"
-                if volume_enabled():
-                    press_volume_down(session)
-                    volume_action = "volume_down_applied"
-
-                return JSONResponse(
-                    {
-                        "ok": True,
-                        "action": "default",
-                        "target": target,
-                        "source_changed_to": source_payload(source),
-                        "volume": volume_action,
-                        "status": get_tv_status(session),
-                    }
-                )
+                    return JSONResponse(
+                        {
+                            "ok": True,
+                            "action": "switch_to_default_mode",
+                            "target": target,
+                            "wake_signal_sent": wake_signal_sent,
+                            "wake_attempts": wake_attempts,
+                            "source_changed_to": source,
+                            "volume": volume,
+                            "status": get_tv_status(session),
+                        }
+                    )
+            finally:
+                session.__exit__(None, None, None)
 
         raise HTTPException(status_code=400, detail="Unsupported action")
 

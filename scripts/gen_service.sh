@@ -23,19 +23,14 @@ fi
 if [[ ! -x "${DEFAULT_VENV_PYTHON}" ]]; then
   echo "Could not find a virtualenv Python at:"
   echo "  ${DEFAULT_VENV_PYTHON}"
-  echo
-  echo "Create the venv first, for example:"
-  echo "  python3 -m venv .venv"
-  echo "  source .venv/bin/activate"
-  echo "  pip install fastapi uvicorn cec"
   exit 1
 fi
 
-echo "=== CEC API systemd service setup ==="
+echo "=== WebOS TV API systemd service setup ==="
 echo
 
-read -r -p "Service name [cec-api]: " INPUT_NAME
-SERVICE_BASENAME="${INPUT_NAME:-cec-api}"
+read -r -p "Service name [webos-tv-api]: " INPUT_NAME
+SERVICE_BASENAME="${INPUT_NAME:-webos-tv-api}"
 SERVICE_NAME="${SERVICE_BASENAME}.service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 
@@ -80,7 +75,7 @@ fi
 
 cat > "${SERVICE_PATH}" <<EOF
 [Unit]
-Description=HDMI CEC API
+Description=LG WebOS TV API
 After=network-online.target
 Wants=network-online.target
 

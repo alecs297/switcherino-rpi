@@ -7,9 +7,9 @@ if [[ "$EUID" -ne 0 ]]; then
   exit 1
 fi
 
-DEFAULT_NAME="cec-api"
+DEFAULT_NAME="webos-tv-api"
 
-echo "=== Remove CEC API systemd service ==="
+echo "=== Remove WebOS TV API systemd service ==="
 echo
 
 read -r -p "Service name [${DEFAULT_NAME}]: " INPUT_NAME

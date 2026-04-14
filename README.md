@@ -23,6 +23,34 @@ Important notes:
 - WebOS network control must be available on the TV
 - powering the TV on cannot be done through WebOS alone; if you want `turn_on`, configure Wake-on-LAN with the TV MAC address in `config.json`
 
+## TV Settings Checklist
+
+Before pairing the TV with the Pi, review these settings on the TV itself.
+
+Recommended settings:
+
+- disable `Energy Saving` or `Energy Saving Step`
+- enable `TV On With Mobile`
+- inside `TV On With Mobile`, enable `Turn on via Wi-Fi`
+
+Exact LG menu names vary slightly by webOS version.
+
+Common paths:
+
+- webOS 23: `Settings` -> `General` -> `External Devices` -> `TV On With Mobile` -> `Turn on via Wi-Fi`
+- webOS 22 / webOS 6.0: `Settings` -> `General` -> `Devices` -> `External Devices` -> `TV On With Mobile` -> `Turn on via Wi-Fi`
+- older models may expose a similar option under `Mobile TV On` or `Mobile Connection Management`
+
+For power saving:
+
+- many models use `Settings` -> `Picture` -> `Energy Saving` -> `Off`
+- some newer models expose `Settings` -> `General` -> `OLED Care` -> `Device Self Care` -> `Energy Saving Step` -> `Off`
+
+If these options are enabled differently on your model, keep the same intent:
+
+- avoid aggressive energy saving modes
+- keep Wi-Fi wake enabled so the TV can respond to network wake features
+
 ## Installation
 
 ### 1 - Set up the Pi
@@ -136,7 +164,8 @@ Review `config.json` and adjust the important fields:
 
 Notes:
 
-- `default_target` and `pc_target` must match WebOS source ids or labels exposed by the TV
+- `default_target` and `pc_target` should preferably use WebOS source ids such as `HDMI_1` or `HDMI_2`
+- labels are accepted too, but they are not guaranteed to be unique on LG TVs
 - if you want the `turn_on` action to work, set `tv_mac` to the TV MAC address for Wake-on-LAN
 - if you leave `tv_mac` empty, `turn_on` will return an error by design
 
@@ -184,10 +213,15 @@ Interactive docs are available at:
 
 ## API Behavior
 
-The API keeps the original route names for compatibility:
+Main API routes:
 
-- `GET /cec/status`
-- `POST /cec/action`
+- `GET /tv/status`
+- `POST /tv/action`
+
+Hidden compatibility aliases also exist:
+
+- `GET /webos/status`
+- `POST /webos/action`
 
 Supported actions:
 
@@ -211,8 +245,62 @@ Example request:
 curl -k -u admin:YOUR_ADMIN_KEY \
   -H "Content-Type: application/json" \
   -d '{"action":"change_source","target":"HDMI_1"}' \
-  https://PI_IP:8443/cec/action
+  https://PI_IP:8443/tv/action
 ```
+
+Example `GET /tv/status` response shape:
+
+```json
+{
+  "ok": true,
+  "status": {
+    "host": "192.168.50.46",
+    "secure": true,
+    "system": {
+      "product_name": "webOSTV 24",
+      "model_name": "HE_DTV_W24G_AFABATAA",
+      "major_ver": "23",
+      "minor_ver": "20.39",
+      "device_id": "f8:01:b4:d2:c6:5a"
+    },
+    "current_app": "com.webos.app.hdmi4",
+    "volume": {
+      "volumeStatus": {
+        "volume": 13,
+        "muteStatus": false,
+        "soundOutput": "tv_speaker"
+      }
+    },
+    "sources": [
+      {
+        "id": "HDMI_1",
+        "label": "PC",
+        "connected": true
+      },
+      {
+        "id": "HDMI_2",
+        "label": "PC",
+        "connected": true
+      },
+      {
+        "id": "HDMI_4",
+        "label": "Apple OTT",
+        "connected": true
+      }
+    ],
+    "default_target": "HDMI_1",
+    "pc_target": "HDMI_2",
+    "volume_control_enabled": false
+  }
+}
+```
+
+Important interpretation notes:
+
+- `sources[*].id` is the safest value to use in `config.json` and in `change_source`
+- `sources[*].label` may be duplicated; for example both `HDMI_1` and `HDMI_2` can be labeled `PC`
+- `current_app` usually reflects the active HDMI app, such as `com.webos.app.hdmi4`
+- the `raw` payload returned by the API contains extra LG metadata such as `appId`, `port`, signal presence, and EDID-derived device information
 
 ## Files
 
@@ -223,5 +311,6 @@ curl -k -u admin:YOUR_ADMIN_KEY \
 ## Caveats
 
 - WebOS cannot power on the TV by itself; Wake-on-LAN is the fallback
-- source ids vary between TV models, so verify the values saved in `pairing.json`
+- source ids vary between TV models, so verify the values saved in `pairing.json` or returned by `/tv/status`
+- source labels may be ambiguous, so prefer `HDMI_1`, `HDMI_2`, and similar ids over labels such as `PC`
 - the pairing flow depends on the TV model and WebOS version; some TVs show a code, others only ask for confirmation

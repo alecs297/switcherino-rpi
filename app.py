@@ -33,6 +33,114 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
+STATUS_EXAMPLE = {
+    "ok": True,
+    "status": {
+        "host": "192.168.50.46",
+        "secure": True,
+        "system": {
+            "product_name": "webOSTV 24",
+            "model_name": "HE_DTV_W24G_AFABATAA",
+            "major_ver": "23",
+            "minor_ver": "20.39",
+            "device_id": "f8:01:b4:d2:c6:5a",
+        },
+        "current_app": "com.webos.app.hdmi4",
+        "volume": {
+            "volumeStatus": {
+                "volume": 13,
+                "muteStatus": False,
+                "soundOutput": "tv_speaker",
+            },
+            "callerId": "secondscreen.client",
+        },
+        "sources": [
+            {
+                "id": "HDMI_1",
+                "label": "PC",
+                "connected": True,
+                "icon": "https://192.168.50.46:3001/resources/example/pc.png",
+                "raw": {
+                    "id": "HDMI_1",
+                    "label": "PC",
+                    "port": 1,
+                    "connected": True,
+                    "appId": "com.webos.app.hdmi1",
+                },
+            },
+            {
+                "id": "HDMI_2",
+                "label": "PC",
+                "connected": True,
+                "icon": "https://192.168.50.46:3001/resources/example/pc.png",
+                "raw": {
+                    "id": "HDMI_2",
+                    "label": "PC",
+                    "port": 2,
+                    "connected": True,
+                    "appId": "com.webos.app.hdmi2",
+                },
+            },
+            {
+                "id": "HDMI_4",
+                "label": "Apple OTT",
+                "connected": True,
+                "icon": "https://192.168.50.46:3001/resources/example/streamingbox.png",
+                "raw": {
+                    "id": "HDMI_4",
+                    "label": "Apple OTT",
+                    "port": 4,
+                    "connected": True,
+                    "appId": "com.webos.app.hdmi4",
+                },
+            },
+        ],
+        "default_target": "HDMI_1",
+        "pc_target": "HDMI_2",
+        "volume_control_enabled": False,
+    },
+}
+
+ACTION_RESPONSE_EXAMPLES = {
+    "change_source": {
+        "summary": "Switch to a specific HDMI input",
+        "value": {
+            "ok": True,
+            "action": "change_source",
+            "target": "HDMI_4",
+            "source": {
+                "id": "HDMI_4",
+                "label": "Apple OTT",
+                "connected": True,
+            },
+            "status": {
+                "current_app": "com.webos.app.hdmi4",
+                "default_target": "HDMI_1",
+                "pc_target": "HDMI_2",
+            },
+        },
+    },
+    "game": {
+        "summary": "Switch to the configured gaming source",
+        "value": {
+            "ok": True,
+            "action": "game",
+            "target": "HDMI_2",
+            "source_changed_to": {
+                "id": "HDMI_2",
+                "label": "PC",
+                "connected": True,
+            },
+            "volume": "skipped",
+            "status": {
+                "current_app": "com.webos.app.hdmi2",
+                "default_target": "HDMI_1",
+                "pc_target": "HDMI_2",
+            },
+        },
+    },
+}
+
 
 class ActionRequest(BaseModel):
     action: Literal["turn_on", "turn_off", "change_source", "game", "default"] = Field(
@@ -392,12 +500,55 @@ async def certs():
 
 
 @app.get(
-    "/cec/status",
+    "/tv/status",
     tags=["TV"],
     summary="Get LG TV status",
-    description="Returns WebOS information, source list, and configured target aliases.",
+    description=(
+        "Returns the current WebOS session status, system info, active app, volume state, "
+        "and the list of available sources.\n\n"
+        "Prefer `sources[*].id` such as `HDMI_1` or `HDMI_2` when configuring targets, "
+        "because labels like `PC` may be duplicated."
+    ),
+    responses={
+        200: {
+            "description": "Current TV status and source metadata",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "status": {
+                            "summary": "Typical status payload from a paired LG TV",
+                            "value": STATUS_EXAMPLE,
+                        }
+                    }
+                }
+            },
+        },
+        401: {
+            "description": "Authentication required or invalid credentials",
+            "content": {"application/json": {"example": {"detail": "Unauthorized"}}},
+        },
+        503: {
+            "description": "TV unavailable or pairing missing",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "missing_pairing": {
+                            "summary": "Pairing file is missing",
+                            "value": {
+                                "detail": "Missing pairing file at /path/pairing.json. Run `python3 scripts/pairing.py` before starting the app."
+                            },
+                        },
+                        "tv_unreachable": {
+                            "summary": "TV cannot be reached on the hotspot",
+                            "value": {"detail": "TV unreachable: timed out"},
+                        },
+                    }
+                }
+            },
+        },
+    },
 )
-async def cec_status(_: None = Depends(check_basic_auth)):
+async def tv_status(_: None = Depends(check_basic_auth)):
     try:
         with WebOSTVSession() as session:
             return JSONResponse(
@@ -413,7 +564,7 @@ async def cec_status(_: None = Depends(check_basic_auth)):
 
 
 @app.post(
-    "/cec/action",
+    "/tv/action",
     tags=["TV"],
     summary="Perform a TV action",
     description=(
@@ -423,9 +574,76 @@ async def cec_status(_: None = Depends(check_basic_auth)):
         "- `turn_off` -> Turn the TV off\n"
         "- `change_source` -> Switch to a configured or explicit source\n"
         "- `game` -> Switch to `pc_target` and optionally raise volume\n"
-        "- `default` -> Switch to `default_target` and optionally lower volume"
+        "- `default` -> Switch to `default_target` and optionally lower volume\n\n"
+        "### Target advice\n"
+        "- prefer source ids such as `HDMI_1` over labels such as `PC`\n"
+        "- labels can be duplicated on LG TVs\n"
+        "- use `GET /tv/status` to inspect available sources"
     ),
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "change_source_by_id": {
+                            "summary": "Switch to a source by id",
+                            "value": {"action": "change_source", "target": "HDMI_4"},
+                        },
+                        "change_source_by_alias": {
+                            "summary": "Switch using a configured alias",
+                            "value": {"action": "change_source", "target": "default"},
+                        },
+                        "game": {
+                            "summary": "Switch to the configured PC source",
+                            "value": {"action": "game"},
+                        },
+                        "default": {
+                            "summary": "Return to the default source",
+                            "value": {"action": "default"},
+                        },
+                        "turn_off": {
+                            "summary": "Power the TV off",
+                            "value": {"action": "turn_off"},
+                        },
+                        "turn_on": {
+                            "summary": "Wake the TV over the network",
+                            "value": {"action": "turn_on"},
+                        },
+                    }
+                }
+            }
+        }
+    },
     responses={
+        200: {
+            "description": "Action completed successfully",
+            "content": {
+                "application/json": {
+                    "examples": ACTION_RESPONSE_EXAMPLES
+                }
+            },
+        },
+        400: {
+            "description": "Invalid request payload",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "invalid_mac": {
+                            "summary": "Invalid Wake-on-LAN MAC address",
+                            "value": {"detail": "Invalid tv_mac format"},
+                        }
+                    }
+                }
+            },
+        },
+        404: {
+            "description": "Requested source could not be found",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Source not found: HDMI_9"}
+                }
+            },
+        },
         401: {
             "description": "Authentication required or invalid credentials",
             "content": {"application/json": {"example": {"detail": "Unauthorized"}}},
@@ -442,7 +660,7 @@ async def cec_status(_: None = Depends(check_basic_auth)):
         },
     },
 )
-async def cec_action(
+async def tv_action(
     body: ActionRequest,
     _: None = Depends(check_basic_auth),
 ):
@@ -546,6 +764,27 @@ async def cec_action(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=503, detail=f"TV unreachable: {exc}") from exc
+
+
+@app.get(
+    "/webos/status",
+    tags=["TV"],
+    include_in_schema=False,
+)
+async def webos_status_alias(_: None = Depends(check_basic_auth)):
+    return await tv_status(_)
+
+
+@app.post(
+    "/webos/action",
+    tags=["TV"],
+    include_in_schema=False,
+)
+async def webos_action_alias(
+    body: ActionRequest,
+    _: None = Depends(check_basic_auth),
+):
+    return await tv_action(body, _)
 
 
 if __name__ == "__main__":

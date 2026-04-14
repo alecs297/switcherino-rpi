@@ -1,28 +1,50 @@
 # switcherino-rpi
-Raspberry PI zero utility
+
+Utility for controlling an LG TV from a Raspberry Pi Zero W over WebOS.
+
+## Overview
+
+The Raspberry Pi is powered by the TV over USB-PD and connects to Wi-Fi. At boot, it can also expose a second Wi-Fi network so the TV joins the Pi directly. Once the TV is on that hotspot, the API served by the Pi can control the TV through LG WebOS instead of HDMI-CEC.
+
+The current repository contains:
+
+- a FastAPI app in `app.py`
+- a hotspot setup script in `scripts/setup_wifi.sh`
+- a pairing helper in `scripts/pairing.py`
+- helper scripts for certificates and service installation
 
 ## Requirements
 
-This project was made specifically for the Raspberry Pi Zero W. It requires the Pi to be connected to the TV through a HDMI CEC cable. It also obviously requires the TV to support CEC and CEC to be enabled.
+This project targets a Raspberry Pi Zero W and an LG TV running WebOS.
+
+Important notes:
+
+- the TV must be able to connect to the hotspot exposed by the Pi
+- WebOS network control must be available on the TV
+- powering the TV on cannot be done through WebOS alone; if you want `turn_on`, configure Wake-on-LAN with the TV MAC address in `config.json`
 
 ## Installation
 
-### 1 - Set up the PI
+### 1 - Set up the Pi
 
-Flash Raspberry Pi OS Lite (32-bit) to the microSD card with Raspberry Pi Imager. The headless version is recommended. Follow the steps listed [here](https://www.raspberrypi.com/documentation/computers/getting-started.html) to get started, harden your SSH configuration and configure networking (you will want the Pi to be reachable on the local network)
+Flash Raspberry Pi OS Lite (32-bit) to the microSD card with Raspberry Pi Imager. The headless version is recommended.
 
-### 2 - Set up the environment
+Follow the Raspberry Pi getting started guide [here](https://www.raspberrypi.com/documentation/computers/getting-started.html) and make sure the Pi has:
 
-Install the required dependencies
+- SSH access
+- Internet access
+- a working Wi-Fi client connection on `wlan0`
+
+### 2 - Install system packages
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip git libcec-dev openssl hostapd dnsmasq iw
+sudo apt install -y python3 python3-venv python3-pip git openssl hostapd dnsmasq iw
 ```
 
-### 3 - Disable the dnsmasq service
+### 3 - Disable the default `hostapd` and `dnsmasq` services
 
-The service has just been installed but won't be used as is. It can therefore be disabled with
+Those packages are used directly by the custom hotspot script, not via their stock services.
 
 ```bash
 sudo systemctl disable --now hostapd.service
@@ -31,32 +53,33 @@ sudo systemctl mask hostapd.service
 sudo systemctl mask dnsmasq.service
 ```
 
-### 4 - Get the software
-
-Clone the repo to your home directory (or somewhere else, but adapt the commands)
+### 4 - Clone the repository and install Python dependencies
 
 ```bash
 cd ~
 git clone https://github.com/alecs297/switcherino-rpi
 cd switcherino-rpi
-```
-
-Create a python virtual environment and install the dependencies
-
-```
 python3 -m venv venv
 source venv/bin/activate
 python3 -m pip install -r requirements.txt
 ```
 
-Configure the hotspot service by editing [scripts/setup_wifi.sh](./scripts/setup_wifi.sh) and setting up the following variables :
+## Hotspot Setup
+
+Edit [`scripts/setup_wifi.sh`](./scripts/setup_wifi.sh) and adapt at least:
 
 ```bash
-SSID="Pi-C2" # Your hotspot's name
-PASSPHRASE="12121212" # Your hotspot's password
+SSID="PiHotspot"
+PASSPHRASE="12345678"
 ```
 
-Set up the hotspot service
+You may also want to review:
+
+- `STA_IF`
+- `AP_IF`
+- `AP_IP_CIDR`
+
+Install the hotspot script as a one-shot systemd service:
 
 ```bash
 sudo cp scripts/setup_wifi.sh /usr/local/bin/setup_wifi.sh
@@ -80,12 +103,125 @@ systemctl daemon-reload
 systemctl enable pihotspot.service'
 ```
 
-Test the hotspot service. The command should be a success and an AP should appear on your TV's available WIFI networks. You can proceed to connect the TV. If this doesn't work, good luck troubleshooting !
+Test it manually:
 
 ```bash
 sudo /usr/local/bin/setup_wifi.sh
 ```
 
+If the script succeeds, the TV should see the hotspot in its Wi-Fi list and be able to join it.
 
-### 5 - Configure the software
+## Application Setup
 
+### 1 - Create the application config
+
+Run the app once:
+
+```bash
+python3 app.py
+```
+
+On first start, this creates `config.json`, prints the generated admin key, and exits.
+
+Review `config.json` and adjust the important fields:
+
+```json
+{
+  "default_target": "HDMI_1",
+  "pc_target": "HDMI_2",
+  "change_volume": false,
+  "tv_mac": ""
+}
+```
+
+Notes:
+
+- `default_target` and `pc_target` must match WebOS source ids or labels exposed by the TV
+- if you want the `turn_on` action to work, set `tv_mac` to the TV MAC address for Wake-on-LAN
+- if you leave `tv_mac` empty, `turn_on` will return an error by design
+
+### 2 - Generate HTTPS certificates
+
+```bash
+./scripts/gen_certs.sh
+```
+
+### 3 - Pair the Pi with the TV
+
+Make sure the TV is connected to the Pi hotspot, then run:
+
+```bash
+python3 scripts/pairing.py
+```
+
+The script will:
+
+- ask whether the TV is already connected to the hotspot
+- ask for the TV IP, or try to discover it automatically if left blank
+- initiate WebOS pairing
+- ask for the code shown on the TV if needed
+- save everything required for future connections in `pairing.json`
+
+If auto-discovery finds more than one TV, rerun the script and enter the IP manually.
+
+The generated `pairing.json` is required by `app.py` and is intentionally ignored by git.
+
+### 4 - Start the API
+
+```bash
+python3 app.py
+```
+
+By default the API listens on:
+
+- `https://0.0.0.0:8443`
+- with HTTP Basic auth using `admin_username` and `admin_key` from `config.json`
+
+Interactive docs are available at:
+
+- `/docs`
+- `/redoc`
+
+## API Behavior
+
+The API keeps the original route names for compatibility:
+
+- `GET /cec/status`
+- `POST /cec/action`
+
+Supported actions:
+
+- `turn_on`
+- `turn_off`
+- `change_source`
+- `game`
+- `default`
+
+Action behavior:
+
+- `change_source` switches to a source identified by id or label
+- `game` switches to `pc_target`
+- `default` switches to `default_target`
+- `turn_off` powers the TV off via WebOS
+- `turn_on` sends a Wake-on-LAN packet and therefore requires `tv_mac`
+
+Example request:
+
+```bash
+curl -k -u admin:YOUR_ADMIN_KEY \
+  -H "Content-Type: application/json" \
+  -d '{"action":"change_source","target":"HDMI_1"}' \
+  https://PI_IP:8443/cec/action
+```
+
+## Files
+
+- `config.json`: local app configuration generated on first start
+- `pairing.json`: WebOS pairing credentials and discovered source metadata
+- `certs/server.crt` and `certs/server.key`: HTTPS certificate material
+
+## Caveats
+
+- WebOS cannot power on the TV by itself; Wake-on-LAN is the fallback
+- source ids vary between TV models, so verify the values saved in `pairing.json`
+- the pairing flow depends on the TV model and WebOS version; some TVs show a code, others only ask for confirmation

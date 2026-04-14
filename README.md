@@ -17,22 +17,19 @@ Install the required dependencies
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip git cec-utils libcec-dev openssl
+sudo apt install -y python3 python3-venv python3-pip git libcec-dev openssl hostapd dnsmasq iw
 ```
 
-### 3 - Debug your environment
+### 3 - Disable the dnsmasq service
 
-Make sure HDMI CEC is working as expected. The following command should return a list of devices connected to your TV
+The service has just been installed but won't be used as is. It can therefore be disabled with
 
 ```bash
-echo 'scan' | cec-client -s -d 1
+sudo systemctl disable --now hostapd.service
+sudo systemctl disable --now dnsmasq.service
+sudo systemctl mask hostapd.service
+sudo systemctl mask dnsmasq.service
 ```
-
-If this command returns an error, good luck lol.
-
-One debug tip would be to verify CEC is enabled in your TV's settings, and also to try all your HDMI ports (HDMI #3 did not work on the LG C5 for some obscure reason).
-
-At this step you should also note the address of your default HDMI source (eg: Apple TV) and the address of your PC.
 
 ### 4 - Get the software
 
@@ -51,6 +48,44 @@ python3 -m venv venv
 source venv/bin/activate
 python3 -m pip install -r requirements.txt
 ```
+
+Configure the hotspot service by editing [scripts/setup_wifi.sh](./scripts/setup_wifi.sh) and setting up the following variables :
+
+```bash
+SSID="Pi-C2" # Your hotspot's name
+PASSPHRASE="12121212" # Your hotspot's password
+```
+
+Set up the hotspot service
+
+```bash
+sudo cp scripts/setup_wifi.sh /usr/local/bin/setup_wifi.sh
+sudo chmod +x /usr/local/bin/setup_wifi.sh
+sudo bash -c 'cat > /etc/systemd/system/pihotspot.service <<EOF
+[Unit]
+Description=Dynamic Pi Hotspot (client + AP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/setup_wifi.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable pihotspot.service'
+```
+
+Test the hotspot service. The command should be a success and an AP should appear on your TV's available WIFI networks. You can proceed to connect the TV. If this doesn't work, good luck troubleshooting !
+
+```bash
+sudo /usr/local/bin/setup_wifi.sh
+```
+
 
 ### 5 - Configure the software
 

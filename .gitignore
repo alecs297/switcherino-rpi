@@ -1,0 +1,4 @@
+certs/*
+!certs/.keep
+config.json
+venv/

@@ -130,7 +130,7 @@ ACTION_RESPONSE_EXAMPLES = {
         },
     },
     "switch_to_game_mode": {
-        "summary": "Switch to the configured gaming source",
+        "summary": "Enter gaming mode",
         "value": {
             "ok": True,
             "action": "switch_to_game_mode",
@@ -800,11 +800,11 @@ async def tv_status(_: None = Depends(check_basic_auth)):
                             "value": {"action": "change_source", "target": "default"},
                         },
                         "switch_to_game_mode": {
-                            "summary": "Switch to the configured PC source and set game volume",
+                            "summary": "Enter gaming mode",
                             "value": {"action": "switch_to_game_mode"},
                         },
                         "switch_to_default_mode": {
-                            "summary": "Return to the default source and set default volume",
+                            "summary": "Return to default mode",
                             "value": {"action": "switch_to_default_mode"},
                         },
                         "turn_off": {

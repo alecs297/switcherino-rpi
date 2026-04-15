@@ -4,7 +4,7 @@ Utility for controlling an LG TV from a Raspberry Pi Zero W over WebOS.
 
 ## Overview
 
-The Raspberry Pi is powered by the TV over USB-PD and connects to Wi-Fi. At boot, it can also expose a second Wi-Fi network so the TV joins the Pi directly. Once the TV is on that hotspot, the API served by the Pi can control the TV through LG WebOS instead of HDMI-CEC.
+The Raspberry Pi should be powered by a separate stable power supply and connects to Wi-Fi. Do not rely on the TV USB ports for power, because many TVs cut USB power after a while or in standby. At boot, the Pi can also expose a second Wi-Fi network so the TV joins it directly. Once the TV is on that hotspot, the API served by the Pi can control the TV through LG WebOS. This project was initially supposed to use HDMI-CEC, but LG sucks and doesn't allow switching to *other* sources via CEC.
 
 The current repository contains:
 
@@ -181,8 +181,8 @@ Notes:
 
 - `default_target` and `pc_target` should preferably use WebOS source ids such as `HDMI_1` or `HDMI_2`
 - labels are accepted too, but they are not guaranteed to be unique on LG TVs
-- `switch_to_game_mode` uses `pc_target`
-- `switch_to_default_mode` uses `default_target`
+- `switch_to_game_mode` is the "Enter gaming mode" action and uses `pc_target`
+- `switch_to_default_mode` is the "Return to default mode" action and uses `default_target`
 - `change_volume_on_game_mode` and `change_volume_on_default_mode` control whether those mode switches set the TV volume
 - `game_mode_volume` and `default_mode_volume` are explicit target volumes from `0` to `100`
 - if you want the `turn_on` action to work, set `tv_mac` to the TV MAC address for Wake-on-LAN
@@ -194,12 +194,12 @@ Configuration reference:
 - `port`: HTTPS port exposed by the API
 - `admin_username`: HTTP Basic auth username
 - `admin_key`: HTTP Basic auth password
-- `default_target`: source id or unique label used by `switch_to_default_mode`
-- `pc_target`: source id or unique label used by `switch_to_game_mode`
-- `change_volume_on_game_mode`: if `true`, `switch_to_game_mode` sets the TV volume
-- `change_volume_on_default_mode`: if `true`, `switch_to_default_mode` sets the TV volume
-- `game_mode_volume`: target volume applied by `switch_to_game_mode`
-- `default_mode_volume`: target volume applied by `switch_to_default_mode`
+- `default_target`: source id or unique label used by "Return to default mode"
+- `pc_target`: source id or unique label used by "Enter gaming mode"
+- `change_volume_on_game_mode`: if `true`, "Enter gaming mode" sets the TV volume
+- `change_volume_on_default_mode`: if `true`, "Return to default mode" sets the TV volume
+- `game_mode_volume`: target volume applied by "Enter gaming mode"
+- `default_mode_volume`: target volume applied by "Return to default mode"
 - `tv_mac`: MAC address used for Wake-on-LAN
 - `wake_wait_seconds`: fixed wait after sending WOL packets before probing WebOS again
 - `wake_attempts`: number of WOL rounds sent by the API
@@ -341,14 +341,14 @@ Supported actions:
 - `turn_on`
 - `turn_off`
 - `change_source`
-- `switch_to_game_mode`
-- `switch_to_default_mode`
+- `switch_to_game_mode` (`Enter gaming mode`)
+- `switch_to_default_mode` (`Return to default mode`)
 
 Action behavior:
 
 - `change_source` switches to a source identified by id or label and will try to wake the TV first if needed
-- `switch_to_game_mode` switches to `pc_target` and can set the TV volume to `game_mode_volume`
-- `switch_to_default_mode` switches to `default_target` and can set the TV volume to `default_mode_volume`
+- `switch_to_game_mode` (`Enter gaming mode`) switches to `pc_target` and can set the TV volume to `game_mode_volume`
+- `switch_to_default_mode` (`Return to default mode`) switches to `default_target` and can set the TV volume to `default_mode_volume`
 - `turn_off` powers the TV off via WebOS
 - `turn_on` sends a Wake-on-LAN packet, waits for WebOS to come back, and can optionally switch to a target afterward
 

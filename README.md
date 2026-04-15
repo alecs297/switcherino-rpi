@@ -11,6 +11,7 @@ The current repository contains:
 - a FastAPI app in `app.py`
 - a hotspot setup script in `scripts/setup_wifi.sh`
 - a pairing helper in `scripts/pairing.py`
+- a Wake-on-LAN helper in `scripts/wol.py`
 - helper scripts for certificates and service installation
 
 ## Requirements
@@ -155,13 +156,24 @@ Review `config.json` and adjust the important fields:
 
 ```json
 {
+  "host": "0.0.0.0",
+  "port": 8443,
+  "admin_username": "admin",
+  "admin_key": "generated-secret",
   "default_target": "HDMI_1",
   "pc_target": "HDMI_2",
-  "change_volume_on_game_mode": true,
-  "change_volume_on_default_mode": true,
+  "change_volume_on_game_mode": false,
+  "change_volume_on_default_mode": false,
   "game_mode_volume": 15,
   "default_mode_volume": 0,
-  "tv_mac": ""
+  "tv_mac": "44:27:45:22:ab:3e",
+  "wake_wait_seconds": 8.0,
+  "wake_attempts": 3,
+  "wake_attempt_interval_seconds": 2.0,
+  "wake_connect_timeout_seconds": 20.0,
+  "turn_on_target": "",
+  "wake_broadcast_addresses": [],
+  "wake_ports": [9, 7]
 }
 ```
 
@@ -175,6 +187,61 @@ Notes:
 - `game_mode_volume` and `default_mode_volume` are explicit target volumes from `0` to `100`
 - if you want the `turn_on` action to work, set `tv_mac` to the TV MAC address for Wake-on-LAN
 - if you leave `tv_mac` empty, `turn_on` will return an error by design
+
+Configuration reference:
+
+- `host`: bind address for the FastAPI server
+- `port`: HTTPS port exposed by the API
+- `admin_username`: HTTP Basic auth username
+- `admin_key`: HTTP Basic auth password
+- `default_target`: source id or unique label used by `switch_to_default_mode`
+- `pc_target`: source id or unique label used by `switch_to_game_mode`
+- `change_volume_on_game_mode`: if `true`, `switch_to_game_mode` sets the TV volume
+- `change_volume_on_default_mode`: if `true`, `switch_to_default_mode` sets the TV volume
+- `game_mode_volume`: target volume applied by `switch_to_game_mode`
+- `default_mode_volume`: target volume applied by `switch_to_default_mode`
+- `tv_mac`: MAC address used for Wake-on-LAN
+- `wake_wait_seconds`: fixed wait after sending WOL packets before probing WebOS again
+- `wake_attempts`: number of WOL rounds sent by the API
+- `wake_attempt_interval_seconds`: delay between WOL rounds
+- `wake_connect_timeout_seconds`: how long the API waits for the TV to become reachable again
+- `turn_on_target`: optional fallback target used by `turn_on` if the request body does not provide one
+- `wake_broadcast_addresses`: optional list of extra broadcast addresses for WOL
+- `wake_ports`: UDP ports used for WOL packets; defaults are `9` and `7`
+- `cert_file`: path to the TLS certificate used by the API
+- `key_file`: path to the TLS private key used by the API
+- `suggested_base_url`: convenience value returned by `/certs`
+
+Wake-on-LAN notes:
+
+- the API always tries `255.255.255.255`
+- it also derives the `/24` broadcast address from the TV IP stored in `pairing.json`
+- you can force extra addresses with `wake_broadcast_addresses`
+- if a manual test only works with a specific broadcast address, add it here explicitly
+
+Wake-on-LAN helper script:
+
+```bash
+python3 scripts/wol.py extract
+python3 scripts/wol.py test --debug
+python3 scripts/wol.py all
+```
+
+The script can:
+
+- read the default `config.json` and `pairing.json`
+- use a custom config file with `--config`
+- use a custom pairing file with `--pairing`
+- override values directly with `--mac`, `--host`, `--broadcast`, `--port`, `--attempts`, and `--interval`
+
+Examples:
+
+```bash
+python3 scripts/wol.py extract
+python3 scripts/wol.py test --debug
+python3 scripts/wol.py all --mac 44:27:45:22:ab:3e --host 192.168.50.46 --broadcast 192.168.50.255 --port 9
+python3 scripts/wol.py test --config /path/to/other-config.json --pairing /path/to/other-pairing.json
+```
 
 ### 2 - Generate HTTPS certificates
 

@@ -150,6 +150,10 @@ ACTION_RESPONSE_EXAMPLES = {
             "action": "turn_on",
             "wake_signal_sent": True,
             "wake_attempts": 2,
+            "wake_targets": [
+                {"address": "255.255.255.255", "port": 9},
+                {"address": "192.168.50.255", "port": 9},
+            ],
             "tv_online": True,
             "tv_mac": "f8:01:b4:d2:c6:5a",
             "target_after_wake": "HDMI_2",
@@ -735,7 +739,15 @@ async def tv_status(_: None = Depends(check_basic_auth)):
         "### Target advice\n"
         "- prefer source ids such as `HDMI_1` over labels such as `PC`\n"
         "- labels can be duplicated on LG TVs\n"
-        "- use `GET /tv/status` to inspect available sources"
+        "- use `GET /tv/status` to inspect available sources\n\n"
+        "### Wake-on-LAN configuration\n"
+        "- `tv_mac` is required for `turn_on`\n"
+        "- `wake_attempts`, `wake_attempt_interval_seconds`, `wake_wait_seconds`, and `wake_connect_timeout_seconds` tune the wake flow\n"
+        "- `wake_broadcast_addresses` and `wake_ports` control where WOL packets are sent\n"
+        "- `turn_on_target` is used when `turn_on` is called without a request target\n\n"
+        "### Mode volume configuration\n"
+        "- `change_volume_on_game_mode` and `game_mode_volume` control `switch_to_game_mode`\n"
+        "- `change_volume_on_default_mode` and `default_mode_volume` control `switch_to_default_mode`"
     ),
     openapi_extra={
         "requestBody": {

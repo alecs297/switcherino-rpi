@@ -8,10 +8,11 @@ if [[ "$EUID" -ne 0 ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DEFAULT_USER="${SUDO_USER:-$(whoami)}"
-DEFAULT_WORKDIR="${SCRIPT_DIR}"
-DEFAULT_APP="${SCRIPT_DIR}/app.py"
-DEFAULT_VENV_PYTHON="${SCRIPT_DIR}/.venv/bin/python"
+DEFAULT_WORKDIR="${PROJECT_DIR}"
+DEFAULT_APP="${PROJECT_DIR}/app.py"
+DEFAULT_VENV_PYTHON="${PROJECT_DIR}/venv/bin/python"
 
 if [[ ! -f "${DEFAULT_APP}" ]]; then
   echo "Could not find app.py at:"

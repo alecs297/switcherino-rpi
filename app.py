@@ -1,6 +1,7 @@
 import hashlib
 import ipaddress
 import json
+import logging
 import secrets
 import socket
 import ssl
@@ -19,6 +20,12 @@ from pywebostv.controls import ApplicationControl, MediaControl, SourceControl, 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
 PAIRING_PATH = APP_DIR / "pairing.json"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("switcherino.webos")
 
 security = HTTPBasic()
 
@@ -462,14 +469,20 @@ def find_source(session: WebOSTVSession, target: str) -> Any:
 def wait_for_tv_connection(timeout_seconds: float) -> WebOSTVSession:
     deadline = time.monotonic() + max(timeout_seconds, 0.0)
     last_exception: Exception | None = None
+    attempt = 0
+
+    logger.info("Waiting for TV to become reachable for up to %.1f seconds", timeout_seconds)
 
     while time.monotonic() <= deadline:
+        attempt += 1
         session = WebOSTVSession()
         try:
             session.__enter__()
+            logger.info("TV became reachable after %d connection probe(s)", attempt)
             return session
         except Exception as exc:
             last_exception = exc
+            logger.info("TV still unreachable on probe %d: %s", attempt, exc)
             session.__exit__(None, None, None)
             time.sleep(1.0)
 
@@ -505,6 +518,7 @@ def send_wol_sequence(tv_mac: str) -> tuple[int, list[tuple[str, int]]]:
     last_targets: list[tuple[str, int]] = []
 
     for attempt_index in range(wake_attempts):
+        logger.info("Sending Wake-on-LAN attempt %d/%d", attempt_index + 1, wake_attempts)
         last_targets = send_wol_packet(tv_mac)
         if attempt_index < wake_attempts - 1 and wake_attempt_interval > 0:
             time.sleep(wake_attempt_interval)
@@ -516,6 +530,13 @@ def wake_tv_and_wait(tv_mac: str) -> tuple[WebOSTVSession, int, list[tuple[str, 
     wake_attempts, wake_targets = send_wol_sequence(tv_mac)
     wait_seconds = float(CONFIG.get("wake_wait_seconds", 8.0))
     connect_timeout = float(CONFIG.get("wake_connect_timeout_seconds", 20.0))
+
+    logger.info(
+        "Wake-on-LAN sent to %s via %s; waiting %.1f seconds before probing connectivity",
+        tv_mac,
+        ", ".join(f"{address}:{port}" for address, port in wake_targets),
+        wait_seconds,
+    )
 
     if wait_seconds > 0:
         time.sleep(wait_seconds)
@@ -532,8 +553,15 @@ def open_session_for_source_change() -> tuple[WebOSTVSession, bool, int]:
         session.__exit__(None, None, None)
         tv_mac = str(CONFIG.get("tv_mac") or "").strip()
         if not tv_mac:
+            logger.warning(
+                "TV is unreachable before source change and no tv_mac is configured, cannot try Wake-on-LAN"
+            )
             raise
 
+        logger.warning(
+            "TV appears to be off or unreachable before source change, trying Wake-on-LAN with tv_mac=%s",
+            tv_mac,
+        )
         session, wake_attempts, _wake_targets = wake_tv_and_wait(tv_mac)
         return session, True, wake_attempts
 
@@ -621,6 +649,10 @@ def send_wol_packet(mac_address: str) -> list[tuple[str, int]]:
 
     packet = b"\xff" * 6 + mac_bytes * 16
     wake_targets = get_wake_targets()
+    logger.info(
+        "Sending magic packet to %s",
+        ", ".join(f"{address}:{port}" for address, port in wake_targets),
+    )
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         for address, port in wake_targets:
@@ -845,10 +877,12 @@ async def tv_action(
                 )
 
             target_after_wake = resolve_turn_on_target(body.target)
+            logger.info("Received turn_on action with target_after_wake=%s", target_after_wake)
             session, wake_attempts, wake_targets = wake_tv_and_wait(tv_mac)
             try:
                 source_changed_to = None
                 if target_after_wake is not None:
+                    logger.info("TV is awake, switching to target %s after wake", target_after_wake)
                     source_changed_to = switch_to_target(session, target_after_wake)
 
                 return JSONResponse(
@@ -872,6 +906,7 @@ async def tv_action(
                 session.__exit__(None, None, None)
 
         if action == "turn_off":
+            logger.info("Received turn_off action")
             with WebOSTVSession() as session:
                 session.system.power_off()
                 return JSONResponse(
@@ -886,10 +921,17 @@ async def tv_action(
             "switch_to_game_mode",
             "switch_to_default_mode",
         }:
+            logger.info("Received %s action", action)
             session, wake_signal_sent, wake_attempts = open_session_for_source_change()
             try:
                 if action == "change_source":
                     target = resolve_target(body.target)
+                    logger.info(
+                        "Changing source to %s (wake_signal_sent=%s, wake_attempts=%d)",
+                        target,
+                        wake_signal_sent,
+                        wake_attempts,
+                    )
                     source = switch_to_target(session, target)
                     return JSONResponse(
                         {
@@ -905,9 +947,19 @@ async def tv_action(
 
                 if action == "switch_to_game_mode":
                     target = resolve_mode_target("pc")
+                    logger.info(
+                        "Switching to game mode on target %s (wake_signal_sent=%s, wake_attempts=%d)",
+                        target,
+                        wake_signal_sent,
+                        wake_attempts,
+                    )
                     source = switch_to_target(session, target)
                     volume = {"changed": False, "target": None}
                     if volume_enabled_for_game_mode():
+                        logger.info(
+                            "Applying game mode volume target %s",
+                            int(CONFIG.get("game_mode_volume", 15)),
+                        )
                         volume = set_volume_target(
                             session, int(CONFIG.get("game_mode_volume", 15))
                         )
@@ -927,9 +979,19 @@ async def tv_action(
 
                 if action == "switch_to_default_mode":
                     target = resolve_mode_target("default")
+                    logger.info(
+                        "Switching to default mode on target %s (wake_signal_sent=%s, wake_attempts=%d)",
+                        target,
+                        wake_signal_sent,
+                        wake_attempts,
+                    )
                     source = switch_to_target(session, target)
                     volume = {"changed": False, "target": None}
                     if volume_enabled_for_default_mode():
+                        logger.info(
+                            "Applying default mode volume target %s",
+                            int(CONFIG.get("default_mode_volume", 0)),
+                        )
                         volume = set_volume_target(
                             session, int(CONFIG.get("default_mode_volume", 0))
                         )

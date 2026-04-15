@@ -3,3 +3,5 @@ certs/*
 config.json
 pairing.json
 venv/
+*.pyc
+__pycache__/

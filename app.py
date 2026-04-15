@@ -105,7 +105,8 @@ STATUS_EXAMPLE = {
         ],
         "default_target": "HDMI_1",
         "pc_target": "HDMI_2",
-        "volume_control_enabled": False,
+        "change_volume_on_game_mode": False,
+        "change_volume_on_default_mode": False,
     },
 }
 
@@ -266,10 +267,12 @@ def write_default_config_and_exit() -> None:
     raise SystemExit(0)
 
 
-def load_json_file(path: Path, missing_message: str) -> dict[str, Any]:
+def load_json_file(path: Path, missing_message: str, *, exit_on_missing: bool = True) -> dict[str, Any]:
     if not path.exists():
-        print(missing_message)
-        raise SystemExit(1)
+        if exit_on_missing:
+            print(missing_message)
+            raise SystemExit(1)
+        raise RuntimeError(missing_message)
 
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -284,10 +287,11 @@ CONFIG = load_json_file(
     CONFIG_PATH,
     f"Missing config file at {CONFIG_PATH}. Start the app once to create it.",
 )
-PAIRING = load_json_file(
-    PAIRING_PATH,
-    f"Missing pairing file at {PAIRING_PATH}. Run `python3 scripts/pairing.py` before starting the app.",
-)
+
+if not PAIRING_PATH.exists():
+    logger.warning(
+        "pairing.json is missing at startup; TV endpoints will return 503 until `python3 scripts/pairing.py` is run"
+    )
 
 
 def save_pairing(pairing: dict[str, Any]) -> None:
@@ -324,6 +328,7 @@ def read_pairing() -> dict[str, Any]:
     return load_json_file(
         PAIRING_PATH,
         f"Missing pairing file at {PAIRING_PATH}. Run `python3 scripts/pairing.py` before starting the app.",
+        exit_on_missing=False,
     )
 
 
@@ -1017,28 +1022,6 @@ async def tv_action(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=503, detail=f"TV unreachable: {exc}") from exc
-
-
-@app.get(
-    "/webos/status",
-    tags=["TV"],
-    include_in_schema=False,
-)
-async def webos_status_alias(_: None = Depends(check_basic_auth)):
-    return await tv_status(_)
-
-
-@app.post(
-    "/webos/action",
-    tags=["TV"],
-    include_in_schema=False,
-)
-async def webos_action_alias(
-    body: ActionRequest,
-    _: None = Depends(check_basic_auth),
-):
-    return await tv_action(body, _)
-
 
 if __name__ == "__main__":
     uvicorn.run(

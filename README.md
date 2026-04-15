@@ -285,17 +285,56 @@ Interactive docs are available at:
 - `/docs`
 - `/redoc`
 
+### 5 - Install the API as a systemd service
+
+A helper script already exists to register the app as a service and start it at boot:
+
+```bash
+sudo ./scripts/gen_service.sh
+```
+
+The script will:
+
+- create a systemd unit for `app.py`
+- enable it at boot
+- start it immediately
+- configure it to restart automatically on failure
+- order it after `network-online.target` and `pihotspot.service`
+
+The default service name is:
+
+- `webos-tv-api`
+
+To inspect the service:
+
+```bash
+systemctl status webos-tv-api.service
+```
+
+To follow logs:
+
+```bash
+journalctl -u webos-tv-api.service -f
+```
+
+To see recent logs:
+
+```bash
+journalctl -u webos-tv-api.service -n 200 --no-pager
+```
+
+To remove the service later:
+
+```bash
+sudo ./scripts/remove_service.sh
+```
+
 ## API Behavior
 
 Main API routes:
 
 - `GET /tv/status`
 - `POST /tv/action`
-
-Hidden compatibility aliases also exist:
-
-- `GET /webos/status`
-- `POST /webos/action`
 
 Supported actions:
 
@@ -364,7 +403,8 @@ Example `GET /tv/status` response shape:
     ],
     "default_target": "HDMI_1",
     "pc_target": "HDMI_2",
-    "volume_control_enabled": false
+    "change_volume_on_game_mode": false,
+    "change_volume_on_default_mode": false
   }
 }
 ```
@@ -388,3 +428,4 @@ Important interpretation notes:
 - source ids vary between TV models, so verify the values saved in `pairing.json` or returned by `/tv/status`
 - source labels may be ambiguous, so prefer `HDMI_1`, `HDMI_2`, and similar ids over labels such as `PC`
 - the pairing flow depends on the TV model and WebOS version; some TVs show a code, others only ask for confirmation
+- if the hotspot or TV comes up after the API service starts, the app should keep running; TV requests will begin working as soon as the TV becomes reachable

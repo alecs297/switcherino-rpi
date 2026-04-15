@@ -76,8 +76,8 @@ fi
 cat > "${SERVICE_PATH}" <<EOF
 [Unit]
 Description=LG WebOS TV API
-After=network-online.target
-Wants=network-online.target
+After=network-online.target pihotspot.service
+Wants=network-online.target pihotspot.service
 
 [Service]
 Type=simple

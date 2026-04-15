@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from pywebostv.connection import WebOSClient
 from pywebostv.controls import ApplicationControl, MediaControl, SourceControl, SystemControl
@@ -27,19 +28,40 @@ logging.basicConfig(
 )
 logger = logging.getLogger("switcherino.webos")
 
-security = HTTPBasic()
+security = HTTPBearer(auto_error=False)
 
 app = FastAPI(
     title="LG WebOS TV API",
     description=(
         "HTTPS API for controlling an LG TV from a Raspberry Pi over WebOS. "
-        "Protected TV endpoints use HTTP Basic authentication."
+        "Protected TV endpoints use Bearer authentication with an API key."
     ),
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
 
 STATUS_EXAMPLE = {
     "ok": True,
@@ -236,8 +258,7 @@ def write_default_config_and_exit() -> None:
     config = {
         "host": "0.0.0.0",
         "port": 8443,
-        "admin_username": "admin",
-        "admin_key": generate_admin_key(),
+        "api_key": generate_admin_key(),
         "default_target": "HDMI_1",
         "pc_target": "HDMI_2",
         "tv_mac": "",
@@ -261,7 +282,7 @@ def write_default_config_and_exit() -> None:
 
     print(f"Created config at: {CONFIG_PATH}")
     print(f"Detected IP: {local_ip}")
-    print(f"Generated admin key: {config['admin_key']}")
+    print(f"Generated API key: {config['api_key']}")
     print("Before starting the app, create pairing.json with `python3 scripts/pairing.py`.")
     print("Then review config.json, run ./scripts/gen_certs.sh, and start the app again.")
     raise SystemExit(0)
@@ -288,6 +309,10 @@ CONFIG = load_json_file(
     f"Missing config file at {CONFIG_PATH}. Start the app once to create it.",
 )
 
+if "api_key" not in CONFIG and "admin_key" in CONFIG:
+    logger.warning("config.json uses legacy `admin_key`; migrating in memory to `api_key`")
+    CONFIG["api_key"] = CONFIG["admin_key"]
+
 if not PAIRING_PATH.exists():
     logger.warning(
         "pairing.json is missing at startup; TV endpoints will return 503 until `python3 scripts/pairing.py` is run"
@@ -298,17 +323,27 @@ def save_pairing(pairing: dict[str, Any]) -> None:
     PAIRING_PATH.write_text(json.dumps(pairing, indent=2) + "\n", encoding="utf-8")
 
 
-def check_basic_auth(
-    credentials: HTTPBasicCredentials = Depends(security),
+def check_bearer_auth(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> None:
+    expected_token = str(CONFIG.get("api_key") or "").strip()
+    provided_token = credentials.credentials if credentials is not None else ""
+
+    if not expected_token:
+        raise HTTPException(
+            status_code=503,
+            detail="Missing `api_key` in config.json",
+        )
+
     if not (
-        secrets.compare_digest(credentials.username, CONFIG["admin_username"])
-        and secrets.compare_digest(credentials.password, CONFIG["admin_key"])
+        credentials is not None
+        and credentials.scheme.lower() == "bearer"
+        and secrets.compare_digest(provided_token, expected_token)
     ):
         raise HTTPException(
             status_code=401,
             detail="Unauthorized",
-            headers={"WWW-Authenticate": "Basic"},
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
 
@@ -722,7 +757,7 @@ async def certs():
             },
         },
         401: {
-            "description": "Authentication required or invalid credentials",
+            "description": "Bearer token missing or invalid",
             "content": {"application/json": {"example": {"detail": "Unauthorized"}}},
         },
         503: {
@@ -746,7 +781,7 @@ async def certs():
         },
     },
 )
-async def tv_status(_: None = Depends(check_basic_auth)):
+async def tv_status(_: None = Depends(check_bearer_auth)):
     try:
         with WebOSTVSession() as session:
             return JSONResponse(
@@ -851,7 +886,7 @@ async def tv_status(_: None = Depends(check_basic_auth)):
             },
         },
         401: {
-            "description": "Authentication required or invalid credentials",
+            "description": "Bearer token missing or invalid",
             "content": {"application/json": {"example": {"detail": "Unauthorized"}}},
         },
         503: {
@@ -868,7 +903,7 @@ async def tv_status(_: None = Depends(check_basic_auth)):
 )
 async def tv_action(
     body: ActionRequest,
-    _: None = Depends(check_basic_auth),
+    _: None = Depends(check_bearer_auth),
 ):
     action = body.action
 

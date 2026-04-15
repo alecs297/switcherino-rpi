@@ -1,28 +1,46 @@
 # switcherino-rpi
 
-Utility for controlling an LG TV from a Raspberry Pi Zero W over WebOS.
+Utility for controlling an LG TV from a Raspberry Pi Zero W over WebOS. The main objective is to be able to automate switching from my default source (Apple TV) to my gaming source (PC), while also synchronizing the sound settings.
 
-## Overview
+## What This Project Does
 
-The Raspberry Pi should be powered by a separate stable power supply and connects to Wi-Fi. Do not rely on the TV USB ports for power, because many TVs cut USB power after a while or in standby. At boot, the Pi can also expose a second Wi-Fi network so the TV joins it directly. Once the TV is on that hotspot, the API served by the Pi can control the TV through LG WebOS. This project was initially supposed to use HDMI-CEC, but LG sucks and doesn't allow switching to *other* sources via CEC.
+This project turns a Raspberry Pi into a small control bridge for an LG TV:
 
-The current repository contains:
+- the Pi runs a local HTTPS API
+- the Pi joins your normal Wi-Fi network
+- the Pi can also expose a second Wi-Fi hotspot
+- the TV connects to that hotspot
+- the API then talks to the TV through LG WebOS
 
-- a FastAPI app in `app.py`
-- a hotspot setup script in `scripts/setup_wifi.sh`
-- a pairing helper in `scripts/pairing.py`
-- a Wake-on-LAN helper in `scripts/wol.py`
-- helper scripts for certificates and service installation
+The original goal was to do this over HDMI-CEC, but that approach broke down because LG does not reliably allow switching to other sources over CEC. The project now uses WebOS instead.
 
-## Requirements
+The setup might be a little overkill, since I don't want my TV to be connected to my local network and even less to the internet. This may be simplified by configuring your router but I want this solution to be independent.
 
-This project targets a Raspberry Pi Zero W and an LG TV running WebOS.
+## Setup Model
 
-Important notes:
+The setup is:
+
+- the Pi is connected to Wi-Fi and exposes a separate dedicated hotspot
+- the TV connects to the Pi hotspot
+- the app pairs once with the TV and stores credentials in `pairing.json`
+- clients call the Pi API to wake the TV, change source, or switch modes
+
+Important power note: do not rely on the TV USB ports to power the Pi, most TVs cut the power at some point during sleep.
+
+## Hardware requirements
+
+This project targets:
+
+- a Raspberry Pi Zero W
+- an LG TV running WebOS
+
+Technically speaking, you *could* run the web app on something else.
+
+Notes:
 
 - the TV must be able to connect to the hotspot exposed by the Pi
 - WebOS network control must be available on the TV
-- powering the TV on cannot be done through WebOS alone; if you want `turn_on`, configure Wake-on-LAN with the TV MAC address in `config.json`
+- `turn_on` relies on Wake-on-LAN because WebOS alone cannot power the TV on
 
 ## TV Settings Checklist
 
@@ -47,11 +65,6 @@ For power saving:
 - many models use `Settings` -> `Picture` -> `Energy Saving` -> `Off`
 - some newer models expose `Settings` -> `General` -> `OLED Care` -> `Device Self Care` -> `Energy Saving Step` -> `Off`
 
-If these options are enabled differently on your model, keep the same intent:
-
-- avoid aggressive energy saving modes
-- keep Wi-Fi wake enabled so the TV can respond to network wake features
-
 ## Installation
 
 ### 1 - Set up the Pi
@@ -63,6 +76,7 @@ Follow the Raspberry Pi getting started guide [here](https://www.raspberrypi.com
 - SSH access
 - Internet access
 - a working Wi-Fi client connection on `wlan0`
+- a separate stable power supply
 
 ### 2 - Install system packages
 
@@ -93,7 +107,7 @@ source venv/bin/activate
 python3 -m pip install -r requirements.txt
 ```
 
-## Hotspot Setup
+### 5 - Configure and install the hotspot service
 
 Edit [`scripts/setup_wifi.sh`](./scripts/setup_wifi.sh) and adapt at least:
 
@@ -140,9 +154,7 @@ sudo /usr/local/bin/setup_wifi.sh
 
 If the script succeeds, the TV should see the hotspot in its Wi-Fi list and be able to join it.
 
-## Application Setup
-
-### 1 - Create the application config
+### 6 - Create the application config
 
 Run the app once:
 
@@ -158,8 +170,7 @@ Review `config.json` and adjust the important fields:
 {
   "host": "0.0.0.0",
   "port": 8443,
-  "admin_username": "admin",
-  "admin_key": "generated-secret",
+  "api_key": "generated-secret",
   "default_target": "HDMI_1",
   "pc_target": "HDMI_2",
   "change_volume_on_game_mode": false,
@@ -177,79 +188,47 @@ Review `config.json` and adjust the important fields:
 }
 ```
 
-Notes:
-
-- `default_target` and `pc_target` should preferably use WebOS source ids such as `HDMI_1` or `HDMI_2`
-- labels are accepted too, but they are not guaranteed to be unique on LG TVs
-- `switch_to_game_mode` is the "Enter gaming mode" action and uses `pc_target`
-- `switch_to_default_mode` is the "Return to default mode" action and uses `default_target`
-- `change_volume_on_game_mode` and `change_volume_on_default_mode` control whether those mode switches set the TV volume
-- `game_mode_volume` and `default_mode_volume` are explicit target volumes from `0` to `100`
-- if you want the `turn_on` action to work, set `tv_mac` to the TV MAC address for Wake-on-LAN
-- if you leave `tv_mac` empty, `turn_on` will return an error by design
-
 Configuration reference:
 
-- `host`: bind address for the FastAPI server
-- `port`: HTTPS port exposed by the API
-- `admin_username`: HTTP Basic auth username
-- `admin_key`: HTTP Basic auth password
-- `default_target`: source id or unique label used by "Return to default mode"
-- `pc_target`: source id or unique label used by "Enter gaming mode"
-- `change_volume_on_game_mode`: if `true`, "Enter gaming mode" sets the TV volume
-- `change_volume_on_default_mode`: if `true`, "Return to default mode" sets the TV volume
-- `game_mode_volume`: target volume applied by "Enter gaming mode"
-- `default_mode_volume`: target volume applied by "Return to default mode"
-- `tv_mac`: MAC address used for Wake-on-LAN
-- `wake_wait_seconds`: fixed wait after sending WOL packets before probing WebOS again
-- `wake_attempts`: number of WOL rounds sent by the API
-- `wake_attempt_interval_seconds`: delay between WOL rounds
-- `wake_connect_timeout_seconds`: how long the API waits for the TV to become reachable again
-- `turn_on_target`: optional fallback target used by `turn_on` if the request body does not provide one
-- `wake_broadcast_addresses`: optional list of extra broadcast addresses for WOL
-- `wake_ports`: UDP ports used for WOL packets; defaults are `9` and `7`
-- `cert_file`: path to the TLS certificate used by the API
-- `key_file`: path to the TLS private key used by the API
-- `suggested_base_url`: convenience value returned by `/certs`
+| Key | Purpose |
+| --- | --- |
+| `host` | Bind address for the FastAPI server |
+| `port` | HTTPS port exposed by the API |
+| `api_key` | Bearer token used to authenticate protected endpoints |
+| `default_target` | Source id or unique label used by `switch_to_default_mode` |
+| `pc_target` | Source id or unique label used by `switch_to_game_mode` |
+| `change_volume_on_game_mode` | If `true`, `switch_to_game_mode` sets the TV volume |
+| `change_volume_on_default_mode` | If `true`, `switch_to_default_mode` sets the TV volume |
+| `game_mode_volume` | Target volume applied by `switch_to_game_mode` |
+| `default_mode_volume` | Target volume applied by `switch_to_default_mode` |
+| `tv_mac` | MAC address used for Wake-on-LAN |
+| `wake_wait_seconds` | Fixed wait after sending WOL packets before probing WebOS again |
+| `wake_attempts` | Number of WOL rounds sent by the API |
+| `wake_attempt_interval_seconds` | Delay between WOL rounds |
+| `wake_connect_timeout_seconds` | How long the API waits for the TV to become reachable again |
+| `turn_on_target` | Optional fallback target used by `turn_on` if the request body does not provide one |
+| `wake_broadcast_addresses` | Optional list of extra broadcast addresses for WOL |
+| `wake_ports` | UDP ports used for WOL packets |
+| `cert_file` | Path to the TLS certificate used by the API |
+| `key_file` | Path to the TLS private key used by the API |
+| `suggested_base_url` | Convenience value returned by `/certs` |
 
-Wake-on-LAN notes:
+Important configuration notes:
 
-- the API always tries `255.255.255.255`
-- it also derives the `/24` broadcast address from the TV IP stored in `pairing.json`
-- you can force extra addresses with `wake_broadcast_addresses`
-- if a manual test only works with a specific broadcast address, add it here explicitly
+- prefer WebOS source ids such as `HDMI_1` and `HDMI_2` over labels, because labels may not be unique
+- `switch_to_game_mode` uses `pc_target`
+- `switch_to_default_mode` uses `default_target`
+- `game_mode_volume` and `default_mode_volume` are target volumes from `0` to `100`
+- protected endpoints now use `Authorization: Bearer <api_key>`
+- if `tv_mac` is empty, `turn_on` will return an error by design
 
-Wake-on-LAN helper script:
-
-```bash
-python3 scripts/wol.py extract
-python3 scripts/wol.py test --debug
-python3 scripts/wol.py all
-```
-
-The script can:
-
-- read the default `config.json` and `pairing.json`
-- use a custom config file with `--config`
-- use a custom pairing file with `--pairing`
-- override values directly with `--mac`, `--host`, `--broadcast`, `--port`, `--attempts`, and `--interval`
-
-Examples:
-
-```bash
-python3 scripts/wol.py extract
-python3 scripts/wol.py test --debug
-python3 scripts/wol.py all --mac 44:27:45:22:ab:3e --host 192.168.50.46 --broadcast 192.168.50.255 --port 9
-python3 scripts/wol.py test --config /path/to/other-config.json --pairing /path/to/other-pairing.json
-```
-
-### 2 - Generate HTTPS certificates
+### 7 - Generate HTTPS certificates
 
 ```bash
 ./scripts/gen_certs.sh
 ```
 
-### 3 - Pair the Pi with the TV
+### 8 - Pair the Pi with the TV
 
 Make sure the TV is connected to the Pi hotspot, then run:
 
@@ -269,7 +248,38 @@ If auto-discovery finds more than one TV, rerun the script and enter the IP manu
 
 The generated `pairing.json` is required by `app.py` and is intentionally ignored by git.
 
-### 4 - Start the API
+### 9 - Verify or debug Wake-on-LAN if needed
+
+The helper script can inspect and test the WOL setup:
+
+```bash
+python3 scripts/wol.py extract
+python3 scripts/wol.py test --debug
+python3 scripts/wol.py all
+```
+
+It can:
+
+- read the default `config.json` and `pairing.json`
+- use custom files with `--config` and `--pairing`
+- override values directly with `--mac`, `--host`, `--broadcast`, `--port`, `--attempts`, and `--interval`
+
+Examples:
+
+```bash
+python3 scripts/wol.py extract
+python3 scripts/wol.py test --debug
+python3 scripts/wol.py all --mac 44:27:45:22:ab:3e --host 192.168.50.46 --broadcast 192.168.50.255 --port 9
+python3 scripts/wol.py test --config /path/to/other-config.json --pairing /path/to/other-pairing.json
+```
+
+Wake-on-LAN notes:
+
+- the API always tries `255.255.255.255`
+- it also derives the `/24` broadcast address from the TV IP stored in `pairing.json`
+- you can force extra addresses with `wake_broadcast_addresses`
+
+### 10 - Start the API
 
 ```bash
 python3 app.py
@@ -278,14 +288,16 @@ python3 app.py
 By default the API listens on:
 
 - `https://0.0.0.0:8443`
-- with HTTP Basic auth using `admin_username` and `admin_key` from `config.json`
+- with Bearer auth using `api_key` from `config.json`
+- with permissive CORS (`*`) for browser clients
+- with common HTTP security headers enabled on responses
 
 Interactive docs are available at:
 
 - `/docs`
 - `/redoc`
 
-### 5 - Install the API as a systemd service
+### 11 - Install the API as a systemd service
 
 A helper script already exists to register the app as a service and start it at boot:
 
@@ -293,13 +305,7 @@ A helper script already exists to register the app as a service and start it at 
 sudo ./scripts/gen_service.sh
 ```
 
-The script will:
-
-- create a systemd unit for `app.py`
-- enable it at boot
-- start it immediately
-- configure it to restart automatically on failure
-- order it after `network-online.target` and `pihotspot.service`
+The script will create a systemd unit for `app.py`, enable it at boot, start it immediately, restart it on failure, and order it after `network-online.target` and `pihotspot.service`.
 
 The default service name is:
 
@@ -331,6 +337,8 @@ sudo ./scripts/remove_service.sh
 
 ## API Behavior
 
+A swagger documentation is exposed at `/docs` or `/redoc` on the Pi.
+
 Main API routes:
 
 - `GET /tv/status`
@@ -347,15 +355,16 @@ Supported actions:
 Action behavior:
 
 - `change_source` switches to a source identified by id or label and will try to wake the TV first if needed
-- `switch_to_game_mode` (`Enter gaming mode`) switches to `pc_target` and can set the TV volume to `game_mode_volume`
-- `switch_to_default_mode` (`Return to default mode`) switches to `default_target` and can set the TV volume to `default_mode_volume`
+- `switch_to_game_mode` switches to `pc_target` and can set the TV volume to `game_mode_volume`
+- `switch_to_default_mode` switches to `default_target` and can set the TV volume to `default_mode_volume`
 - `turn_off` powers the TV off via WebOS
 - `turn_on` sends a Wake-on-LAN packet, waits for WebOS to come back, and can optionally switch to a target afterward
 
 Example request:
 
 ```bash
-curl -k -u admin:YOUR_ADMIN_KEY \
+curl -k \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"action":"change_source","target":"HDMI_1"}' \
   https://PI_IP:8443/tv/action
@@ -414,7 +423,7 @@ Important interpretation notes:
 - `sources[*].id` is the safest value to use in `config.json` and in `change_source`
 - `sources[*].label` may be duplicated; for example both `HDMI_1` and `HDMI_2` can be labeled `PC`
 - `current_app` usually reflects the active HDMI app, such as `com.webos.app.hdmi4`
-- the `raw` payload returned by the API contains extra LG metadata such as `appId`, `port`, signal presence, and EDID-derived device information
+- `raw` contains extra LG metadata such as `appId`, `port`, signal presence, and EDID-derived device information
 
 ## Files
 

@@ -1,6 +1,43 @@
 # switcherino-rpi
 
-Utility for controlling an LG TV from a Raspberry Pi Zero W over WebOS. The main objective is to be able to automate switching from my default source (Apple TV) to my gaming source (PC), while also synchronizing the sound settings.
+Raspberry Pi Zero W HTTPS bridge for controlling an LG TV over WebOS.
+
+`switcherino-rpi` is the TV side of a two-part living-room gaming setup:
+
+- the Raspberry Pi knows how to control the TV
+- the PC knows how to switch its own display and audio state
+- both can work together so a single action moves the setup from a normal desktop / media state to a gaming-on-TV state
+
+This repository focuses on the Raspberry Pi bridge: a local HTTPS API, LG WebOS pairing and control, Wake-on-LAN support, and an optional Wi-Fi hotspot model that keeps the TV off the main network.
+
+## Why This Exists
+
+The original goal was to automate TV source switching over HDMI-CEC.
+
+In practice, that broke down because LG does not allow switching to arbitrary inputs over CEC. WebOS turned out to be much more dependable for source switching, power control, and reading the TV state.
+
+The setup may look a little overkill, but it solves the problem with some specifics criterias :
+
+- the TV should not be able to access the normal local network
+- the TV should be even less able to access the internet
+- the Raspberry Pi can still expose a safe local control API to trusted clients
+- the API can wake the TV, switch to the gaming HDMI input, and optionally synchronize volume settings
+
+This could potentially be simplified with router-level network configuration, but the point here is to keep the solution self-contained and independent.
+
+## The Full Setup
+
+If you use the complete system, both repositories go together:
+
+- [`switcherino-rpi`](https://github.com/alecs297/switcherino-rpi): Raspberry Pi HTTPS bridge for LG WebOS TV control, source switching, optional wake flow, and optional TV hotspot isolation
+- [`switcherino-pc`](https://github.com/alecs297/switcherino-pc): Windows companion app that switches display/audio profiles, launches Steam Big Picture, and calls the Pi bridge
+
+High-level responsibilities:
+
+| Component | Responsibility |
+| --- | --- |
+| `switcherino-rpi` | Control the TV over WebOS, switch HDMI source, optionally wake the TV with Wake-on-LAN, isolate TV networking through the Pi |
+| `switcherino-pc` | Detect trigger, expose local API, switch Windows display/audio profile, launch/monitor Steam Big Picture, roll back on exit |
 
 ## What This Project Does
 
@@ -8,39 +45,94 @@ This project turns a Raspberry Pi into a small control bridge for an LG TV:
 
 - the Pi runs a local HTTPS API
 - the Pi joins your normal Wi-Fi network
-- the Pi can also expose a second Wi-Fi hotspot
+- the Pi also exposes a second Wi-Fi hotspot
 - the TV connects to that hotspot
 - the API then talks to the TV through LG WebOS
 
-The original goal was to do this over HDMI-CEC, but that approach broke down because LG does not reliably allow switching to other sources over CEC. The project now uses WebOS instead.
+Typical usage:
 
-The setup might be a little overkill, since I don't want my TV to be connected to my local network and even less to the internet. This may be simplified by configuring your router but I want this solution to be independent.
+1. a client calls the Pi API
+2. the API wakes the TV if necessary
+3. the API connects to the TV over WebOS
+4. the API changes source, powers the TV off, or switches between normal mode and gaming mode
+5. when enabled, the API also applies the configured target volume for that mode
 
-## Setup Model
+The app pairs once with the TV and stores credentials in `pairing.json`.
 
-The setup is:
+## End-To-End Flow
 
-- the Pi is connected to Wi-Fi and exposes a separate dedicated hotspot
-- the TV connects to the Pi hotspot
-- the app pairs once with the TV and stores credentials in `pairing.json`
-- clients call the Pi API to wake the TV, change source, or switch modes
+Typical gaming-mode flow when used with the companion PC app:
 
-Important power note: do not rely on the TV USB ports to power the Pi, most TVs cut the power at some point during sleep.
+1. `switcherino-pc` decides to enter gaming mode
+2. it calls `POST /tv/action` on the Raspberry Pi bridge
+3. `switcherino-rpi` wakes the TV if needed
+4. the Pi switches the TV to `pc_target`
+5. the Pi optionally applies `game_mode_volume`
+6. later, when the PC leaves gaming mode, it calls the Pi again
+7. the Pi switches the TV back to `default_target`
+8. the Pi optionally applies `default_mode_volume`
 
-## Hardware requirements
+```mermaid
+flowchart LR
+  PC["switcherino-pc"] --> RPI["switcherino-rpi"]
+  API["HTTPS API clients"] --> RPI
+  RPI --> WIFI["Pi hotspot / isolated TV network"]
+  RPI --> WEBOS["LG WebOS"]
+  WEBOS --> TV["LG TV"]
+```
+
+## Hardware Requirements
 
 This project targets:
 
 - a Raspberry Pi Zero W
 - an LG TV running WebOS
 
-Technically speaking, you *could* run the web app on something else.
+Technically, the web app could run on something else, but the intended target is a Raspberry Pi Zero W.
 
-Notes:
+Important note: do not rely on the TV USB ports to power the Pi, because most TVs cut USB power at some point during sleep.
 
-- the TV must be able to connect to the hotspot exposed by the Pi
-- WebOS network control must be available on the TV
-- `turn_on` relies on Wake-on-LAN because WebOS alone cannot power the TV on
+Other importantish note : for now, the `turn_on` feature relies on Wake-on-LAN because WebOS alone cannot power the TV on.
+
+## Features
+
+- local HTTPS API with Bearer-token authentication
+- LG WebOS TV pairing and control
+- TV source switching by source id or label
+- mode-oriented actions for `switch_to_game_mode` and `switch_to_default_mode`
+- optional volume synchronization for gaming mode and default mode
+- Wake-on-LAN support for turning the TV on
+- optional configurable fallback `turn_on_target`
+- self-hosted certificate endpoint at `GET /certs`
+- Pi hotspot setup for a TV-only Wi-Fi segment
+- helper scripts for pairing, certificates, Wake-on-LAN validation, hotspot setup, and systemd service installation
+- FastAPI interactive docs at `/docs` and `/redoc`
+
+## Relationship With `switcherino-pc`
+
+The Pi project is useful on its own if you just want an HTTPS bridge for LG WebOS control from another client.
+
+When paired with [`switcherino-pc`](https://github.com/alecs297/switcherino-pc), it becomes the TV-orchestration half of the full setup.
+
+What the companion PC project adds:
+
+- a Windows tray app
+- a local PC-side HTTPS API
+- controller long-press detection
+- Windows display topology switching
+- Windows audio endpoint and volume switching
+- Steam Big Picture launch and automatic rollback
+
+The PC app typically calls the Pi on:
+
+- `GET /tv/status`
+- `POST /tv/action`
+
+The Pi app provides:
+
+- `switch_to_game_mode` to move the TV to the gaming input
+- `switch_to_default_mode` to restore the normal source
+- `turn_on`, `turn_off`, and `change_source` for TV-side workflows
 
 ## TV Settings Checklist
 
@@ -67,7 +159,7 @@ For power saving:
 
 ## Installation
 
-### 1 - Set up the Pi
+### 1. Set up the Pi
 
 Flash Raspberry Pi OS Lite (32-bit) to the microSD card with Raspberry Pi Imager. The headless version is recommended.
 
@@ -78,14 +170,14 @@ Follow the Raspberry Pi getting started guide [here](https://www.raspberrypi.com
 - a working Wi-Fi client connection on `wlan0`
 - a separate stable power supply
 
-### 2 - Install system packages
+### 2. Install system packages
 
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip git openssl hostapd dnsmasq iw
 ```
 
-### 3 - Disable the default `hostapd` and `dnsmasq` services
+### 3. Disable the default `hostapd` and `dnsmasq` services
 
 Those packages are used directly by the custom hotspot script, not via their stock services.
 
@@ -96,7 +188,7 @@ sudo systemctl mask hostapd.service
 sudo systemctl mask dnsmasq.service
 ```
 
-### 4 - Clone the repository and install Python dependencies
+### 4. Clone the repository and install Python dependencies
 
 ```bash
 cd ~
@@ -107,7 +199,13 @@ source venv/bin/activate
 python3 -m pip install -r requirements.txt
 ```
 
-### 5 - Configure and install the hotspot service
+Runtime dependencies are primarily:
+
+- `fastapi` + `uvicorn` for the HTTPS API
+- `pydantic` for request validation
+- `pywebostv` for LG WebOS control
+
+### 5. Configure and install the hotspot service
 
 Edit [`scripts/setup_wifi.sh`](./scripts/setup_wifi.sh) and adapt at least:
 
@@ -121,6 +219,14 @@ You may also want to review:
 - `STA_IF`
 - `AP_IF`
 - `AP_IP_CIDR`
+
+Notable behavior of the hotspot script:
+
+- it expects to run as root
+- it uses `wlan0` as the station interface by default
+- it creates a virtual AP interface named `wlan0_ap`
+- if `wlan0` is already connected, it reuses the current Wi-Fi channel
+- it writes `hostapd` and `dnsmasq` config files under `/etc`
 
 Install the hotspot script as a one-shot systemd service:
 
@@ -152,9 +258,9 @@ Test it manually:
 sudo /usr/local/bin/setup_wifi.sh
 ```
 
-If the script succeeds, the TV should see the hotspot in its Wi-Fi list and be able to join it.
+If the script succeeds, the TV should see the hotspot in its Wi-Fi list and be able to join it. The hotspot will be set up automatically on every Pi boot.
 
-### 6 - Create the application config
+### 6. Create the application config
 
 Run the app once:
 
@@ -219,16 +325,30 @@ Important configuration notes:
 - `switch_to_game_mode` uses `pc_target`
 - `switch_to_default_mode` uses `default_target`
 - `game_mode_volume` and `default_mode_volume` are target volumes from `0` to `100`
-- protected endpoints now use `Authorization: Bearer <api_key>`
-- if `tv_mac` is empty, `turn_on` will return an error by design
+- protected endpoints use `Authorization: Bearer <api_key>`
+- if `tv_mac` is empty, `turn_on` returns an error by design
+- on startup, legacy `admin_key` is migrated in memory to `api_key` if present
 
-### 7 - Generate HTTPS certificates
+### 7. Generate HTTPS certificates
 
 ```bash
 ./scripts/gen_certs.sh
 ```
 
-### 8 - Pair the Pi with the TV
+The certificate helper:
+
+- writes files under `certs/`
+- requires an IP address
+- lets you optionally override the default hostname
+- generates a self-signed certificate valid for both the chosen domain and IP
+
+It creates:
+
+- `certs/server.crt`
+- `certs/server.key`
+- `certs/openssl-san.cnf`
+
+### 8. Pair the Pi with the TV
 
 Make sure the TV is connected to the Pi hotspot, then run:
 
@@ -248,7 +368,7 @@ If auto-discovery finds more than one TV, rerun the script and enter the IP manu
 
 The generated `pairing.json` is required by `app.py` and is intentionally ignored by git.
 
-### 9 - Verify or debug Wake-on-LAN if needed
+### 9. Verify or debug Wake-on-LAN if needed
 
 The helper script can inspect and test the WOL setup:
 
@@ -279,25 +399,13 @@ Wake-on-LAN notes:
 - it also derives the `/24` broadcast address from the TV IP stored in `pairing.json`
 - you can force extra addresses with `wake_broadcast_addresses`
 
-### 10 - Start the API
+### 10. Manually test the API (optionnal)
 
 ```bash
 python3 app.py
 ```
 
-By default the API listens on:
-
-- `https://0.0.0.0:8443`
-- with Bearer auth using `api_key` from `config.json`
-- with permissive CORS (`*`) for browser clients
-- with common HTTP security headers enabled on responses
-
-Interactive docs are available at:
-
-- `/docs`
-- `/redoc`
-
-### 11 - Install the API as a systemd service
+### 11. Install the API as a systemd service
 
 A helper script already exists to register the app as a service and start it at boot:
 
@@ -305,7 +413,16 @@ A helper script already exists to register the app as a service and start it at 
 sudo ./scripts/gen_service.sh
 ```
 
-The script will create a systemd unit for `app.py`, enable it at boot, start it immediately, restart it on failure, and order it after `network-online.target` and `pihotspot.service`.
+The script:
+
+- requires `sudo`
+- validates the project directory and the virtualenv Python path
+- prompts for the service name, runtime user, working directory, and `ExecStart`
+- writes a unit under `/etc/systemd/system`
+- enables the service at boot
+- starts it immediately
+- restarts it automatically on failure
+- orders it after `network-online.target` and `pihotspot.service`
 
 The default service name is:
 
@@ -329,48 +446,54 @@ To see recent logs:
 journalctl -u webos-tv-api.service -n 200 --no-pager
 ```
 
-To remove the service later:
+To remove the service:
 
 ```bash
 sudo ./scripts/remove_service.sh
 ```
 
-## API Behavior
+## API
 
-A swagger documentation is exposed at `/docs` or `/redoc` on the Pi.
+Swagger documentation is exposed through FastAPI at:
 
-Main API routes:
+- `/docs`
+- `/redoc`
 
+Main routes:
+
+- `GET /certs`
 - `GET /tv/status`
 - `POST /tv/action`
 
-Supported actions:
+Protected endpoints use:
 
-- `turn_on`
-- `turn_off`
-- `change_source`
-- `switch_to_game_mode` (`Enter gaming mode`)
-- `switch_to_default_mode` (`Return to default mode`)
-
-Action behavior:
-
-- `change_source` switches to a source identified by id or label and will try to wake the TV first if needed
-- `switch_to_game_mode` switches to `pc_target` and can set the TV volume to `game_mode_volume`
-- `switch_to_default_mode` switches to `default_target` and can set the TV volume to `default_mode_volume`
-- `turn_off` powers the TV off via WebOS
-- `turn_on` sends a Wake-on-LAN packet, waits for WebOS to come back, and can optionally switch to a target afterward
-
-Example request:
-
-```bash
-curl -k \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"action":"change_source","target":"HDMI_1"}' \
-  https://PI_IP:8443/tv/action
+```text
+Authorization: Bearer YOUR_API_KEY
 ```
 
-Example `GET /tv/status` response shape:
+### `GET /certs`
+
+Returns certificate material that local clients can use to trust or pin the Pi API, including:
+
+- `suggested_base_url`
+- the certificate SHA-256 fingerprint
+- the PEM certificate text
+
+### `GET /tv/status`
+
+Returns the current TV status, including:
+
+- TV host
+- whether the connection is secure
+- system information
+- current app
+- current volume state
+- discovered sources
+- `default_target`
+- `pc_target`
+- whether game-mode and default-mode volume changes are enabled
+
+Example response shape:
 
 ```json
 {
@@ -425,16 +548,87 @@ Important interpretation notes:
 - `current_app` usually reflects the active HDMI app, such as `com.webos.app.hdmi4`
 - `raw` contains extra LG metadata such as `appId`, `port`, signal presence, and EDID-derived device information
 
+### `POST /tv/action`
+
+Supported actions:
+
+- `turn_on`
+- `turn_off`
+- `change_source`
+- `switch_to_game_mode` (`Enter gaming mode`)
+- `switch_to_default_mode` (`Return to default mode`)
+
+Action behavior:
+
+- `change_source` switches to a source identified by id or label and tries to wake the TV first if needed
+- `switch_to_game_mode` switches to `pc_target` and can set the TV volume to `game_mode_volume`
+- `switch_to_default_mode` switches to `default_target` and can set the TV volume to `default_mode_volume`
+- `turn_off` powers the TV off via WebOS
+- `turn_on` sends Wake-on-LAN packets, waits for WebOS to come back, and can optionally switch to a target afterward
+
+Target behavior:
+
+- `change_source` accepts a source id, a label, or configured aliases such as `default` and `pc`
+- `turn_on` can accept a request target
+- if `turn_on` does not receive a target, it uses `turn_on_target` when configured
+- `switch_to_game_mode` and `switch_to_default_mode` ignore request targets and always use their configured targets
+
+Example request:
+
+```bash
+curl -k \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"change_source","target":"HDMI_1"}' \
+  https://PI_IP:8443/tv/action
+```
+
+## Runtime Behavior
+
+Entering game mode currently does the following:
+
+1. connect to the TV, waking it first if needed
+2. switch to `pc_target`
+3. optionally restore `game_mode_volume`
+
+Returning to default mode currently does the following:
+
+1. connect to the TV, waking it first if needed
+2. switch to `default_target`
+3. optionally restore `default_mode_volume`
+
+Turning the TV on currently does the following:
+
+1. read `tv_mac` from `config.json`
+2. send Wake-on-LAN packets to the default and derived broadcast targets
+3. wait for the TV to become reachable again
+4. optionally switch to the request target or `turn_on_target`
+
+Please note the Wake-on-LAN feature could be buggy, as the TV may occasionally prefer to go to sleep rathen than to follow the power configuration you set.
+
 ## Files
+
+Important local files:
 
 - `config.json`: local app configuration generated on first start
 - `pairing.json`: WebOS pairing credentials and discovered source metadata
 - `certs/server.crt` and `certs/server.key`: HTTPS certificate material
 
+Useful scripts:
+
+- `scripts/setup_wifi.sh`: configure the Pi hotspot using `hostapd` and `dnsmasq`
+- `scripts/gen_certs.sh`: generate self-signed TLS files for the API
+- `scripts/pairing.py`: pair the Pi app with the TV and write `pairing.json`
+- `scripts/wol.py`: inspect and test Wake-on-LAN settings
+- `scripts/gen_service.sh`: install the API as a systemd service
+- `scripts/remove_service.sh`: remove the systemd service later
+
 ## Caveats
 
-- WebOS cannot power on the TV by itself; Wake-on-LAN is the fallback
+- WebOS cannot power on the TV by itself; Wake-on-LAN is the fallback and it can be buggy
 - source ids vary between TV models, so verify the values saved in `pairing.json` or returned by `/tv/status`
 - source labels may be ambiguous, so prefer `HDMI_1`, `HDMI_2`, and similar ids over labels such as `PC`
 - the pairing flow depends on the TV model and WebOS version; some TVs show a code, others only ask for confirmation
-- if the hotspot or TV comes up after the API service starts, the app should keep running; TV requests will begin working as soon as the TV becomes reachable
+- if the hotspot or TV comes up after the API service starts, the app should keep running; TV requests begin working as soon as the TV becomes reachable
+- if `tv_mac` is not configured, `turn_on` fails by design
+- the hotspot approach depends on the Pi Wi-Fi chipset and driver supporting the intended station + AP behavior. This repo is intended for Raspberry Pi Zero W

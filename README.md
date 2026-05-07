@@ -225,6 +225,7 @@ Notable behavior of the hotspot script:
 - it expects to run as root
 - it uses `wlan0` as the station interface by default
 - it creates a virtual AP interface named `wlan0_ap`
+- it disables Wi-Fi power save on `wlan0` to reduce latency and sluggish shared-radio behavior
 - if `wlan0` is already connected, it reuses the current Wi-Fi channel
 - it writes `hostapd` and `dnsmasq` config files under `/etc`
 
@@ -451,6 +452,22 @@ To remove the service:
 ```bash
 sudo ./scripts/remove_service.sh
 ```
+
+### 12. Optional: schedule a daily reboot at 5:00
+
+If you want the Raspberry Pi to reboot automatically every day at 5am, add a root cron entry:
+
+```bash
+sudo crontab -e
+```
+
+Then add:
+
+```cron
+0 5 * * * /sbin/reboot
+```
+
+This is optional, but it can be useful if you want the Pi to self-recover from occasional network or hotspot issues. The reboot time follows the Pi's local timezone.
 
 ## API
 

@@ -64,6 +64,16 @@ wait_for_wlan() {
   exit 1
 }
 
+disable_power_save() {
+  # Shared STA + AP mode on a Pi Zero W can feel very sluggish if Wi-Fi power
+  # saving is left enabled on the station interface.
+  if iw dev "$STA_IF" set power_save off >/dev/null 2>&1; then
+    log "Disabled Wi-Fi power save on $STA_IF"
+  else
+    log "Could not disable Wi-Fi power save on $STA_IF"
+  fi
+}
+
 get_connected_channel() {
   local freq
   freq="$(iw dev "$STA_IF" link 2>/dev/null | awk '/freq:/ {print int($2); exit}')"
@@ -187,6 +197,7 @@ main() {
   require_root
   require_cmds
   wait_for_wlan
+  disable_power_save
 
   local channel=""
   channel="$(get_connected_channel || true)"
